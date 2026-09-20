@@ -1,5 +1,9 @@
 # wows-helper · 战舰世界助手（QQ Agent 插件）
 
+> **仓库**：<https://github.com/fappyhrc/qq-agent-wows-helper>（私有）
+> **版本库约定**：只提交源码。`.hikari-src/`、`.hikari-deps/`、`data/` 等运行时数据（约 890MB）
+> 已被 `.gitignore` 排除；提交前可跑 `node .precommit-scan.mjs` 复查是否有凭据或大文件混入。
+
 群里喊一句 **`@机器人 wws 大和`**（**@ 机器人与 wws 两个条件都要满足**，与官方 wws 机器人一致），
 机器人就把 Hikari-core-v2（yuyuko 平台）查到的战绩**渲染成图片发出来**，
 并把真实数据交给 AI，让 AI 用群里的语气接一句人话。
@@ -108,6 +112,7 @@ plugins/wows-helper/
 ├── bridge/
 │   ├── hikari_bridge.py        HTTP 桥接服务（标准库，无额外 Web 框架）
 │   ├── start-bridge.ps1        Windows 一键：取源码 → 装依赖 → 装 chromium → 启动
+│   ├── create-repo.mjs         用 API 建仓库（幂等；首次发布用，之后不需要）
 │   ├── probe_hikari.py         兼容性/耗时探针（可选，用来量自己机器的延迟）
 │   ├── verify_params.py        核对 init_hikari 入参与 Ignore_List 是否真生效
 │   ├── verify_node.mjs         真实通路端到端核验（真桥接 + Node fetch）
@@ -115,6 +120,7 @@ plugins/wows-helper/
 │   ├── test_config_mapping.py  桥接侧配置/凭据来源自检
 │   └── client-test.mjs         客户端契约自检（假桥接，覆盖 6 类响应）
 ├── 启动桥接服务.bat             双击即用（内部调用 start-bridge.ps1）
+└── push-to-github.ps1          推送到 GitHub 的脚本（含本机两个坑的绕法）
 ├── selfcheck.mjs               本地逻辑自检（@提及/触发判定/格式化/图片服务，68 项）
 ├── e2e-test.mjs                端到端自检（假桥接跑通钩子与工具，51 项）
 └── README.md                   本文件
