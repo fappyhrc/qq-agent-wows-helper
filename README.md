@@ -385,19 +385,19 @@ curl http://127.0.0.1:8788/health
 | 场景 | 耗时 | 备注 |
 |---|---|---|
 | 首次 `set_hikari_config` | **~150 s** | 下载 chromium（约 600 MB）与船图缓存（18 MB），一次性 |
-| 首次查询（依赖已装） | 13~15 s | 含浏览器冷启动 |
-| 热态 `wws me` | **11~13 s** | 水表长图，模板复杂 |
-| 热态 `wws ship 大和` | 6.4 s | |
-| 热态 `wws recent 7` | 5.2 s | |
+| 首次查询（依赖已装） | 45~52 s | 含浏览器冷启动 + 首次取船图缓存 |
+| 热态 `wws ship 圣文森特` | **5.5~6.7 s** | 单船水表，带舰船大背景图 |
+| 热态 `wws me` | 10.2 s | 水表长图，模板更复杂 |
+| 热态 `wws recent 7` | 5.5 s | |
 | 热态 `wws bind_list me` | **2.1 s** | 简单列表模板（53 KB 图） |
 | 无法识别的指令 | 0.00 s | 纯解析、不出图 |
 
 耗时几乎全部集中在**页面加载/模板渲染**阶段；截图本身仅 0.07~0.34 s，
-yuyuko API 取数 0.3~1.5 s。因此"渲染型长图约 10 秒、简单模板 2~3 秒"的差异
-来自模板复杂度，而非机器性能。
+yuyuko API 取数 0.3~1.5 s。其中"等页面加载"一段原本硬等 10 秒、
+5 次实测**每次**都吃满，已由桥接层压到 2 秒左右（见 §10.5）。
 
 **用户体感**：部署后的第一次查询需 1~3 分钟（一次性成本）；
-桥接启动后首次查询 10~15 秒；此后热态 5~13 秒（简单结果约 2 秒）。
+桥接启动后首次查询 45~52 秒；此后热态 5~10 秒（简单结果约 2 秒）。
 查询期间群里不会出现"卡住"感 —— 图片由插件直接发出，模型随后接话。
 
 ---
@@ -447,10 +447,11 @@ yuyuko 凭据的**主通路是插件设置页**：它让不敲命令行、不配
 以及包装 `set_hikari_config` 后**必须映射 `__signature__`**
 （否则 `apply_config` 的签名裁剪会把所有配置项静默丢掉）。详见 §10.6。
 
-**⑧ 渲染那次"10 秒硬超时"被换成有依据的兜底。**
-上游用 `wait_until='networkidle'` 等页面加载，只要一个外部图标资源慢，就吃满 10 秒并判失败。
-但那 10 秒与后面的"渲染完成标记 + `_smart_wait`"是重复的，因此桥接层接管 `Page.goto`：
-超时后改为验证"页面本身是否可用"，可用就继续渲染、不可用才失败。
+**⑧ 渲染那次"白等 10 秒"被换成"补上等错的闸门 + 缩短等待"。**
+上游用 `wait_until='networkidle'` 等页面加载，只要一个外部图标资源慢就吃满 10 秒并判失败。
+但真正该等的舰船大图是 CSS `background-image`，而上游的就绪闸门只统计 `<img>` ——
+**等错了东西**。实测：直接砍短等待会整块丢背景图；先补上背景图跟踪、再砍到 2 秒，
+出图与 10 秒版本**字节完全一致**，单船查询从 13~16 秒降到 5.5~6.7 秒。
 判据用的是 **DOM 是否存在内容**而不是 `readyState === 'complete'`
 （真实 Chromium 实测：资源挂住时 readyState 永远是 `loading`，用它会误杀正常页面）。详见 §10.5。
 
@@ -478,7 +479,7 @@ python plugins/wows-helper/bridge/test_config_mapping.py
 # loguru 只装在 .hikari-deps，脚本会自动带上正确的 PYTHONPATH 重跑自己
 python plugins/wows-helper/bridge/test_template_sync.py
 
-# 渲染等待兜底自检（21 项：networkidle 超时放过 / DOM 空仍失败 / 防叠加）
+# 渲染等待兜底自检（23 项：networkidle 超时放过 / 背景图跟踪 / DOM 空仍失败 / 防叠加）
 python plugins/wows-helper/bridge/test_render_guard.py
 
 # 提交前扫描：检查是否误纳入凭据或异常大文件
@@ -569,7 +570,7 @@ await page.goto(f"file://{temp_file}",
 > 相关自检：`python bridge/test_render_retry.py`（用真实错误文案驱动，
 > 覆盖失败识别、重试后成功、用尽次数、可关闭，以及"业务失败不重试"这一关键约束）。
 
-### 10.5 渲染等待的兜底（把"10 秒硬超时"变成"有依据的兜底"）
+### 10.5 渲染等待的兜底（把"白等 10 秒"变成"有依据的兜底 + 2 秒"）
 
 除了上面的重试，桥接层还接管了上游那次**硬编码 10 秒的 `networkidle` 等待**：
 
@@ -589,10 +590,23 @@ playwright._impl._errors.TimeoutError: Page.goto: Timeout 10000ms exceeded.
   - navigating to "file:///.../browser_temp/temp_7cd583f6.html", waiting until "networkidle"
 ```
 
-**关键观察：这 10 秒等待与后面的等待是重复的。** 同一函数紧接着还有两道更可靠的闸门 ——
-等浏览器端渲染完成标记（15 秒）、`_smart_wait()` 等 `load` + 字体 + 图片解码。
-所以桥接层把 `Page.goto` 包一层：仍是 `networkidle`、仍等 10 秒，只是**超时不再直接判失败**，
-而是先验证"页面本身是否已经可用"：
+**但这 10 秒其实等错了地方。** 两件事实测确认：
+
+1. **它不等你要等的东西。** 上游 `_smart_wait()` 靠 `window.__images_total/__images_loaded`
+   判断"图片都加载完了"，可它**只统计 `<img>` 元素**；而舰船大图是 CSS `background-image`
+   （实测生成的 HTML 里 `<img>` 标签数为 **0**、`background-image` **1 处**）。
+   于是那道就绪闸门以为"没有图片要等"、立刻放行，真正拦住截图时间的只剩 `networkidle` 的 10 秒。
+2. **直接砍短它会丢画面。** 把 `networkidle` 从 10 秒砍到 2.5 秒、不作其他改动，
+   出图**整块舰船背景丢失**（只剩白底卡片，281 KB vs 完整的 407 KB）。
+
+所以修法是"先补上等错的闸门，再缩短等待"：
+
+| 改动 | 作用 |
+|---|---|
+| 给上游 `create_page` 注入一段页内脚本，用 `getComputedStyle` 找出实际生效的 `background-image`，登记进 `__images_total` 并在 `onload` 时计入 `__images_loaded` | 让 `_smart_wait()` **真正等到背景图就绪**（兜底：8 秒强制放行，避免某张图永不返回时卡死） |
+| 把 `networkidle` 的超时从 10 秒缩到 **2 秒**（只改 `wait_until='networkidle'` 那一种调用） | 只当"给外部资源一个机会"，不再为慢资源白等 |
+
+超时后的判定仍然保留完整的安全网：
 
 | 超时后的验证 | 判定 | 结果 |
 |---|---|---|
@@ -604,11 +618,19 @@ playwright._impl._errors.TimeoutError: Page.goto: Timeout 10000ms exceeded.
 > `readyState` 就永远停在 `loading`。真实 Chromium 实测确认过这一点 —— 用 readyState 判断
 > 会把"DOM 完好、能渲染能截图"的正常页面误判成"页面没起来"。这个坑已写成单元用例。
 
-效果：以前遇到这种抖动是"白等 10 秒 → 判失败 → 重试再花十几秒 → 仍可能失败"；
-现在是"等 10 秒 → 确认页面可用 → 直接出图"，用户侧不再看到渲染失败。
+**实测效果**（同机、同指令）：
 
-> 相关自检：`python bridge/test_render_guard.py`（21 项，含"DOM 空时必须仍然失败"
-> 与"非 networkidle 的超时一律不插手"两条关键约束）。
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| `networkidle` 段耗时 | 吃满 10 秒 | **2.1 ~ 5.0 秒**（多为 2.5 秒） |
+| `screenshot()` 整体 | ~13 秒 | **3.3 秒**（其中 `_smart_wait` 仅 0.15 秒） |
+| 单船查询端到端 | 13 ~ 16 秒 | **5.5 ~ 6.7 秒** |
+| 出图 | 完整（407.4 KB） | **字节完全一致**（sha `31aacdde2e302f76`） |
+
+> 5 次真实查询**全部**触发了 `networkidle` 兜底 —— 说明改前每次查询都在白等那 10 秒。
+
+> 相关自检：`python bridge/test_render_guard.py`（23 项，含"DOM 空时必须仍然失败"、
+> "非 networkidle 的超时一律不插手"、"超时确实被缩到 2 秒"三条关键约束）。
 
 ### 10.6 启动日志：哪些可以忽略，哪些必须看
 
@@ -624,7 +646,7 @@ playwright._impl._errors.TimeoutError: Page.goto: Timeout 10000ms exceeded.
 | `INFO 执行初始缓存更新... / 更新战舰资源完成` | 船图缓存检查（本地有 `ship_cache` 时很快） | 忽略 |
 | `INFO 管理员校验串已生成（请私信发送给机器人）：…` | 上游生成的随机串，用于鉴权指令 | 需要管理功能时才理会 |
 | `ERROR 初始化 hikari-core 配置失败: 'NoneType' object is not iterable` | **网络完全不通**且缓存也取不到时上游的崩溃点 | **必须看**：检查代理/网络后重启 |
-| `INFO 页面 networkidle 未在 10 秒内达成（外部图标资源偏慢），已确认页面本身加载完成，继续渲染（13.0s）` | 外部图标资源慢，但页面本身正常，已直接继续渲染 | **可忽略**，见 §10.5 |
+| `INFO 页面 networkidle 未在 2000ms 内达成（外部图标资源偏慢），已确认页面本身加载完成，继续渲染（3.6s）` | 外部图标资源慢，但页面本身正常，已直接继续渲染 | **可忽略**，见 §10.5 |
 | `ERROR` + `Traceback` 里含 `update_template` | 模板同步出现**确定性**故障（清单为空、磁盘写入失败等） | **必须看**：这类不会降级，会原样打印 |
 | `ERROR` + `Traceback` 里含 `Page.goto` / `playwright` | 渲染阶段失败 | 见 §10.4（已自动重试一次） |
 

@@ -588,6 +588,70 @@ def report_template_sync_failure(messages) -> None:
             logger.error(str(text).rstrip('\n'))
 
 
+# 页内脚本：让"CSS background-image"也进入上游的就绪计数。
+#
+# 为什么必须补这一段（真实截图对比得到的结论）：
+#   上游 `_smart_wait()` 会给 `window.__images_total / __images_loaded` 把关，
+#   等"图片全部加载完"。但它**只统计 `<img>` 元素与部分 CSS 背景**，而舰船大图恰恰是
+#   CSS `background-image`（实测：生成的 HTML 里 `<img>` 标签数为 0、`background-image` 1 处）。
+#   于是那道就绪闸门以为"没有图片要等"，**立刻放行** —— 真正拦住截图时间的只剩
+#   `page.goto(wait_until='networkidle')` 那 10 秒。
+#   实测对比：把 networkidle 从 10s 砍到 2.5s，出图**整块舰船背景丢失**（白底卡片），
+#   说明那 10 秒并非白等，只是"等错了东西"。
+#
+# 做法：在页面里补登记 background-image（用 getComputedStyle 找出实际生效的那些），
+# 计入 __images_total，并在 onload 时计入 __images_loaded。这样 `_smart_wait` 会真正
+# 等到背景图就绪，我们才敢把 networkidle 的等待砍短。
+# 兜底：8 秒后强制 +1 一次，保证"某张背景图永不返回"时不会把页面卡死在这里。
+_BG_IMAGE_TRACKER_JS = r"""
+(function () {
+    if (window.__bg_images_tracked_by_wows) return;
+    window.__bg_images_tracked_by_wows = true;
+    window.__bg_pending = 0;
+    var settled = false;
+    function reconcile() {
+        if (settled) return;
+        settled = true;                 // 只登记一次，避免重复计数
+        try {
+            var all = document.querySelectorAll('*');
+            var total = 0, loaded = 0;
+            for (var i = 0; i < all.length; i++) {
+                var bg = getComputedStyle(all[i]).backgroundImage;
+                if (!bg || bg === 'none' || bg.indexOf('url(') !== 0) continue;
+                var url = bg.slice(4, -1).replace(/^["']|["']$/g, '');
+                if (!url || url.indexOf('data:') === 0) continue;
+                total++;
+                var probe = new Image();
+                probe.src = url;
+                if (probe.complete) { loaded++; }
+                else {
+                    probe.onload = probe.onerror = function () {
+                        loaded++;
+                        window.__images_loaded = (window.__images_loaded || 0) + 1;
+                    };
+                }
+            }
+            if (total) {
+                window.__images_total = (window.__images_total || 0) + total;
+                window.__images_loaded = (window.__images_loaded || 0) + loaded;
+            }
+        } catch (e) { /* 任何异常都不阻塞截图 */ }
+    }
+    // 等 DOM 出来再登记；上游紧接着会调 _smart_wait，所以这里必须尽早完成。
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', reconcile, { once: true });
+    } else {
+        reconcile();
+    }
+    // 兜底：万一某张背景图永不返回，8 秒后放行，不让整页卡住
+    setTimeout(function () {
+        window.__images_total = window.__images_total || 0;
+        window.__images_loaded = window.__images_total;
+    }, 8000);
+})();
+"""
+
+
 def install_render_goto_guard() -> bool:
     """接管上游那次"10 秒 networkidle 等待"，把它从**硬失败**改成**有依据的兜底**。
 
@@ -629,7 +693,6 @@ def install_render_goto_guard() -> bool:
         return True
     try:
         from playwright.async_api import Page as _Page
-        from playwright.async_api import TimeoutError as _PWTimeout
     except Exception:                                            # noqa: BLE001
         return False
 
@@ -649,10 +712,74 @@ def install_render_goto_guard() -> bool:
         _render_goto['installed'] = True
         return True
     _render_goto['original'] = original
+    install_background_image_tracker()
+    return _wrap_page_goto(original)
+
+
+def install_background_image_tracker() -> bool:
+    """给上游的 `create_page` 加一段页内脚本，把 CSS background-image 纳入就绪计数。
+
+    上游 `_smart_wait()` 靠 `window.__images_total/__images_loaded` 判断"图片都加载完了"，
+    但它只统计 `<img>`；舰船大图是 CSS `background-image`，因此那道闸门会**立刻放行**，
+    真正的阻塞点只剩 `networkidle` 那 10 秒（详见 :data:`_BG_IMAGE_TRACKER_JS` 的说明）。
+
+    :returns: 安装成功（或已安装）返回 ``True``。
+    """
+    if _render_goto.get('bg_tracker_installed'):
+        return True
+    try:
+        # ⚠️ 上游这个类名是**小写开头**的 `minimal_screens_hot_service`（不是驼峰）。
+        #    写错大小写会 ModuleNotFoundError 被下面的 except 吞掉，表现为"跟踪脚本没装上"
+        #    却不报错 —— 实测踩过。
+        from hikari_core.Html_Render.minimal_screens_hot_service import (
+            minimal_screens_hot_service as _Service,
+        )
+    except Exception:                                            # noqa: BLE001
+        return False
+    original = _Service.__dict__.get('create_page')
+    if original is None or getattr(original, '__wows_bg_tracked__', False):
+        _render_goto['bg_tracker_installed'] = True
+        return True
+
+    async def create_page_with_tracker(self, session_id=None):
+        page = await original(self, session_id)
+        try:
+            await page.add_init_script(_BG_IMAGE_TRACKER_JS)
+        except Exception as exc:                                 # noqa: BLE001
+            logger.debug(f'注入背景图跟踪脚本失败（不影响渲染）：{exc}')
+        return page
+
+    create_page_with_tracker.__wows_bg_tracked__ = True
+    try:
+        _Service.create_page = create_page_with_tracker
+    except Exception:                                            # noqa: BLE001
+        return False
+    _render_goto['bg_tracker_installed'] = True
+    return True
+
+
+def _wrap_page_goto(original) -> bool:
+    """把 ``Page.goto`` 换成"检查后放行"的版本（见 :func:`install_render_goto_guard`）。"""
+    try:
+        from playwright.async_api import Page as _Page
+        from playwright.async_api import TimeoutError as _PWTimeout
+    except Exception:                                            # noqa: BLE001
+        return False
+    # networkidle 只用来"给外部资源一个机会"，真正保证画面完整的是随后的
+    # `_smart_wait()`（load + 字体 + 图片解码）+ 页内背景图跟踪。原来硬等 10 秒纯属浪费：
+    # 只要有一个图标挂住就吃满 10 秒，而画面早就齐了。
+    # 缩短到 2 秒：给快资源留出 settle 时间，又不再为慢资源白等 10 秒。
+    # 实测依据见模块内 `_BG_IMAGE_TRACKER_JS` 的说明与 README §10.5。
+    relaxed_timeout_ms = 2000
 
     async def guarded_goto(self, url, **kwargs):
         """``Page.goto`` 的包装版：networkidle 超时改为"验证后再决定是否放过"。"""
         started = time.time()
+        if kwargs.get('wait_until') == 'networkidle':
+            configured = kwargs.get('timeout')
+            if configured is None or configured > relaxed_timeout_ms:
+                kwargs['timeout'] = relaxed_timeout_ms
+                _render_goto['shortened'] = _render_goto.get('shortened', 0) + 1
         try:
             return await original(self, url, **kwargs)
         except _PWTimeout:
@@ -676,13 +803,15 @@ def install_render_goto_guard() -> bool:
                     loaded = False
             if loaded:
                 _render_goto['relaxed'] = _render_goto.get('relaxed', 0) + 1
-                logger.info(f'页面 networkidle 未在 10 秒内达成（外部图标资源偏慢），'
+                logger.info(f'页面 networkidle 未在 {relaxed_timeout_ms}ms 内达成（外部图标资源偏慢），'
                             f'已确认页面本身加载完成，继续渲染（{time.time() - started:.1f}s）')
                 return None
             raise                            # 页面真的没起来：保持原异常
 
     guarded_goto.__wows_goto_guarded__ = True     # 供上面的"防叠加"判定识别
     try:
+        from playwright.async_api import Page as _Page
+
         _Page.goto = guarded_goto
     except Exception:                                            # noqa: BLE001
         return False

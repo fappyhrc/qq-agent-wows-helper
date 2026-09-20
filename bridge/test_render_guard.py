@@ -222,8 +222,30 @@ check(raised is not None, '原异常被保留', f'实际 {raised!r}')
 check(page.eval_calls, '尝试过 DOM 兜底判据', f'实际 {page.eval_calls}')
 
 print()
-print('=== 5) 非 networkidle 的 goto 超时：一律不插手 ===')
+print('=== 4c) networkidle 的等待被缩短（10s → 2s），其余 wait_until 不动 ===')
+# 依据：真正保证画面完整的是随后的 _smart_wait（load + 字体 + 图片解码）+ 页内背景图跟踪。
+# 原来硬等 10 秒，只要一个图标挂住就吃满；实测缩短后出图与 10 秒版本**字节一致**。
 reset_guard()
+bg.install_render_goto_guard()
+FakePage.load_ready = True
+page = FakePage()
+try:
+    asyncio.run(fake_api.Page.goto(page, 'file:///tmp/x.html', wait_until='networkidle', timeout=10000))
+except Exception:  # noqa: BLE001
+    pass
+net_kwargs = dict(page.goto_calls[0][1])
+check(net_kwargs.get('timeout') == 2000, 'networkidle 超时被缩到 2000ms', f'实际 {net_kwargs}')
+
+page2 = FakePage()
+try:
+    asyncio.run(fake_api.Page.goto(page2, 'file:///tmp/x.html', wait_until='load', timeout=10000))
+except Exception:  # noqa: BLE001
+    pass
+load_kwargs = dict(page2.goto_calls[0][1])
+check(load_kwargs.get('timeout') == 10000, '其它 wait_until 的超时原样保留', f'实际 {load_kwargs}')
+
+print()
+print('=== 5) 非 networkidle 的 goto 超时：一律不插手 ===')
 bg.install_render_goto_guard()
 FakePage.load_ready = True
 page = FakePage()
