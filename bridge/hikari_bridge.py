@@ -296,6 +296,9 @@ TEMPLATE_SYNC_RETRY_DELAY_S = 2.0        # 重试前等待：给 TLS 握手/网�
 # 而它是否已经跑过是模块私有状态。这里用乐观标志避免「每次查询都白等一次网络超时」。
 _template_sync = {'done': False, 'checked': False}
 
+# 渲染等待兜底（见 install_render_goto_guard）
+_render_goto = {'installed': False, 'original': None, 'relaxed': 0}
+
 # 瞬时故障的特征串：出现在截获到的日志文本里即认为"重试有意义"。
 # 只覆盖网络/TLS 一类，**故意不含文件写入与解析类异常**（见 template_failure_is_transient）。
 # ⚠️ 三种"超时"写法都要列：Python 内建 `TimeoutError`、httpx 的 `TimeoutException`、
@@ -583,6 +586,108 @@ def report_template_sync_failure(messages) -> None:
         # 末尾多余的换行要剥掉：上游那条 traceback 本身就以换行结尾，loguru 还会再加一个。
         for text in messages:
             logger.error(str(text).rstrip('\n'))
+
+
+def install_render_goto_guard() -> bool:
+    """接管上游那次"10 秒 networkidle 等待"，把它从**硬失败**改成**有依据的兜底**。
+
+    背景（本机实测到的日志）：
+
+    ```
+    playwright._impl._errors.TimeoutError: Page.goto: Timeout 10000ms exceeded.
+    navigated to "file:///.../browser_temp/temp_7cd583f6.html", waiting until "networkidle"
+    ```
+
+    ``minimal_screens_hot_service.screenshot()`` 第 382-386 行硬编码：
+
+    ```python
+    await page.goto(f"file://{temp_file}", wait_until='networkidle', timeout=10000)
+    ```
+
+    ``networkidle`` 要求"500ms 内没有任何网络请求在飞"。而这些模板要加载十余个
+    **境外/OSS** 资源（`hikari-resource` OSS 的舰种图标、`v3-api.wows.shinoaki.com`
+    的服务器图标等），本机代理到它们的 TLS 握手本身就不稳定 —— 一次抖动就吃满 10 秒，
+    于是整个渲染被判定为失败，**只能靠我们外层的重试再花十几秒重来一遍**。
+
+    关键观察：**这 10 秒等待与后面的等待是重复的**。同一函数紧接着还有两道更可靠的
+    闸门 —— 第 416 行等浏览器端渲染完成标记（15 秒），第 428 行 ``_smart_wait()``
+    等 ``load`` 事件 + 字体就绪 + 图片解码。也就是说即使 ``goto`` 超时，
+    后续两道闸门仍能保证页面渲染完成。
+
+    因此这里把 ``Page.goto`` 包一层：
+
+    * 仍是 ``networkidle``、仍等 10 秒（行为不变），只是**超时不再抛异常**；
+    * 超时后**先验证** ``load`` 事件是否真的发生过（等最多 3 秒）；
+    * 真发生过 → 说明页面本身没问题，只是几个外部资源慢，降级为一行 INFO 继续渲染；
+    * 真没发生（页面根本没起来）→ 保留原有异常，让上层按原逻辑失败。
+
+    这样既不为"慢性子资源"白等 10 秒的失败路径，也不会把"页面真的挂了"掩盖掉。
+
+    :returns: 安装成功（或已安装）返回 ``True``。
+    """
+    if _render_goto.get('installed'):
+        return True
+    try:
+        from playwright.async_api import Page as _Page
+        from playwright.async_api import TimeoutError as _PWTimeout
+    except Exception:                                            # noqa: BLE001
+        return False
+
+    # ⚠️ 必须从类的 __dict__ 里取**未绑定**的原始函数，不能用 getattr(_Page, 'goto')：
+    #    后者拿到的是"绑定到类"的 method，再 original(self, url, ...) 调用会把 self 传两遍，
+    #    抛 TypeError —— 而 TypeError 会被外层误当成渲染失败，表现为"兜底压根没生效"。
+    #    （真实 Chromium 实测踩到这个坑：goto 抛的明明是 TimeoutError，外面看到的却是别的异常。）
+    original = _Page.__dict__.get('goto')
+    if original is None:
+        original = getattr(_Page, 'goto', None)
+    if original is None:
+        return False
+    # 防叠加：若当前已经是我们的包装版（例如测试里重置了 installed 标记后重装、
+    # 或本模块被重新加载），直接返回。否则会把包装版当"上游实现"再包一层，
+    # original 指向自己 → 递归 → networkidle 超时被处理两遍（实测踩过）。
+    if getattr(original, '__wows_goto_guarded__', False):
+        _render_goto['installed'] = True
+        return True
+    _render_goto['original'] = original
+
+    async def guarded_goto(self, url, **kwargs):
+        """``Page.goto`` 的包装版：networkidle 超时改为"验证后再决定是否放过"。"""
+        started = time.time()
+        try:
+            return await original(self, url, **kwargs)
+        except _PWTimeout:
+            if kwargs.get('wait_until') != 'networkidle':
+                raise                       # 只管 networkidle 这一种，其它照旧失败
+            loaded = False
+            # ⚠️ 判据不能是 ``readyState === 'complete'``：只要有一个外部资源永远不返回，
+            #    ``readyState`` 就**永远停在 loading**（真实 Chromium 实测：DOM 完好、
+            #    能渲染能截图，但 readyState 不是 complete）。正确的判据是"文档是否已经
+            #    解析出可用的 DOM" —— ``document.body`` 存在且有内容即说明 HTML 解析完、
+            #    脚本已执行；这类页面对我们来说就是可渲染的。
+            try:
+                await self.wait_for_load_state('load', timeout=3000)
+                loaded = True
+            except Exception:                                     # noqa: BLE001
+                try:
+                    loaded = bool(await self.evaluate(
+                        '() => !!(document.body && (document.body.childElementCount > 0 '
+                        '|| document.body.textContent.trim().length > 0))'))
+                except Exception:                                 # noqa: BLE001
+                    loaded = False
+            if loaded:
+                _render_goto['relaxed'] = _render_goto.get('relaxed', 0) + 1
+                logger.info(f'页面 networkidle 未在 10 秒内达成（外部图标资源偏慢），'
+                            f'已确认页面本身加载完成，继续渲染（{time.time() - started:.1f}s）')
+                return None
+            raise                            # 页面真的没起来：保持原异常
+
+    guarded_goto.__wows_goto_guarded__ = True     # 供上面的"防叠加"判定识别
+    try:
+        _Page.goto = guarded_goto
+    except Exception:                                            # noqa: BLE001
+        return False
+    _render_goto['installed'] = True
+    return True
 
 
 def resolve_ignore_list(names) -> list:
@@ -1182,6 +1287,8 @@ async def amain() -> int:
             )
             if has_cli_token:
                 apply_config({})
+            # 渲染等待兜底：与 hikari-core 配置无关，独立安装（失败也不影响启动）
+            install_render_goto_guard()
         except Exception as exc:
             logger.error(f"初始化 hikari-core 配置失败：{exc}")
             return 3

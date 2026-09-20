@@ -126,6 +126,7 @@ plugins/wows-helper/
 │   ├── test_config_mapping.py  桥接侧配置映射与凭据来源自检
 │   ├── test_render_retry.py    渲染失败识别与自动重试自检
 │   ├── test_template_sync.py   模板清单同步自保层自检（重试 / 降级 / 不吞错）
+│   ├── test_render_guard.py    渲染等待兜底自检（networkidle 超时放过 / DOM 判据）
 │   └── client-test.mjs         客户端契约自检（假桥接，覆盖 6 类响应）
 ├── selfcheck.mjs               本地逻辑自检（68 项）
 ├── e2e-test.mjs                端到端自检（55 项，需起本地 HTTP 假桥接）
@@ -444,7 +445,14 @@ yuyuko 凭据的**主通路是插件设置页**：它让不敲命令行、不配
 这里有两处只有实测才会发现的坑，都已写进代码注释：loguru 的 sink **不可重入**
 （在 sink 里 `logger.remove()` 会抛 `RuntimeError`，必须改用 `filter` 抑制），
 以及包装 `set_hikari_config` 后**必须映射 `__signature__`**
-（否则 `apply_config` 的签名裁剪会把所有配置项静默丢掉）。详见 §10.5。
+（否则 `apply_config` 的签名裁剪会把所有配置项静默丢掉）。详见 §10.6。
+
+**⑧ 渲染那次"10 秒硬超时"被换成有依据的兜底。**
+上游用 `wait_until='networkidle'` 等页面加载，只要一个外部图标资源慢，就吃满 10 秒并判失败。
+但那 10 秒与后面的"渲染完成标记 + `_smart_wait`"是重复的，因此桥接层接管 `Page.goto`：
+超时后改为验证"页面本身是否可用"，可用就继续渲染、不可用才失败。
+判据用的是 **DOM 是否存在内容**而不是 `readyState === 'complete'`
+（真实 Chromium 实测：资源挂住时 readyState 永远是 `loading`，用它会误杀正常页面）。详见 §10.5。
 
 ---
 
@@ -469,6 +477,9 @@ python plugins/wows-helper/bridge/test_config_mapping.py
 # 模板清单同步自保层自检（46 项：重试判定 / 日志降级 / 确定性故障不吞 / 幂等）
 # loguru 只装在 .hikari-deps，脚本会自动带上正确的 PYTHONPATH 重跑自己
 python plugins/wows-helper/bridge/test_template_sync.py
+
+# 渲染等待兜底自检（21 项：networkidle 超时放过 / DOM 空仍失败 / 防叠加）
+python plugins/wows-helper/bridge/test_render_guard.py
 
 # 提交前扫描：检查是否误纳入凭据或异常大文件
 node plugins/wows-helper/.precommit-scan.mjs
@@ -558,7 +569,48 @@ await page.goto(f"file://{temp_file}",
 > 相关自检：`python bridge/test_render_retry.py`（用真实错误文案驱动，
 > 覆盖失败识别、重试后成功、用尽次数、可关闭，以及"业务失败不重试"这一关键约束）。
 
-### 10.5 启动日志：哪些可以忽略，哪些必须看
+### 10.5 渲染等待的兜底（把"10 秒硬超时"变成"有依据的兜底"）
+
+除了上面的重试，桥接层还接管了上游那次**硬编码 10 秒的 `networkidle` 等待**：
+
+```python
+# hikari_core/Html_Render/minimal_screens_hot_service.py:382-386
+await page.goto(f"file://{temp_file}",
+                wait_until='networkidle',   # 要求 500ms 内没有任何网络请求在飞
+                timeout=10000)              # 硬编码 10 秒
+```
+
+模板要加载十余个外部图标（OSS 的舰种/资源图标、服务器图标等）。这些请求在本机走系统代理，
+TLS 握手偶尔会卡住；只要有**一个**资源迟迟不返回，`networkidle` 就永远达不成，
+于是整个渲染被判失败 —— 实测日志就是：
+
+```
+playwright._impl._errors.TimeoutError: Page.goto: Timeout 10000ms exceeded.
+  - navigating to "file:///.../browser_temp/temp_7cd583f6.html", waiting until "networkidle"
+```
+
+**关键观察：这 10 秒等待与后面的等待是重复的。** 同一函数紧接着还有两道更可靠的闸门 ——
+等浏览器端渲染完成标记（15 秒）、`_smart_wait()` 等 `load` + 字体 + 图片解码。
+所以桥接层把 `Page.goto` 包一层：仍是 `networkidle`、仍等 10 秒，只是**超时不再直接判失败**，
+而是先验证"页面本身是否已经可用"：
+
+| 超时后的验证 | 判定 | 结果 |
+|---|---|---|
+| `load` 事件已触发 | 页面正常，只是外部资源慢 | 一行 INFO，继续渲染 |
+| `load` 未触发，但 `document.body` 有内容 | 同上（真实情形） | 一行 INFO，继续渲染 |
+| 两者都不成立（DOM 是空的） | 页面真的挂了 | **保留原异常**，交给重试/报错逻辑 |
+
+> ⚠️ 判据**不能**用 `readyState === 'complete'`：只要有一个外部资源永不返回，
+> `readyState` 就永远停在 `loading`。真实 Chromium 实测确认过这一点 —— 用 readyState 判断
+> 会把"DOM 完好、能渲染能截图"的正常页面误判成"页面没起来"。这个坑已写成单元用例。
+
+效果：以前遇到这种抖动是"白等 10 秒 → 判失败 → 重试再花十几秒 → 仍可能失败"；
+现在是"等 10 秒 → 确认页面可用 → 直接出图"，用户侧不再看到渲染失败。
+
+> 相关自检：`python bridge/test_render_guard.py`（21 项，含"DOM 空时必须仍然失败"
+> 与"非 networkidle 的超时一律不插手"两条关键约束）。
+
+### 10.6 启动日志：哪些可以忽略，哪些必须看
 
 启动时上游会对模板做一次"检查更新"（拉 OSS 清单 → 逐文件比对 → 只写变化的部分）。
 模板**早已随 hikari-core 装在 `.hikari-deps/hikari_core/Template`**（54 个文件，约 4.0 MB），
@@ -572,6 +624,7 @@ await page.goto(f"file://{temp_file}",
 | `INFO 执行初始缓存更新... / 更新战舰资源完成` | 船图缓存检查（本地有 `ship_cache` 时很快） | 忽略 |
 | `INFO 管理员校验串已生成（请私信发送给机器人）：…` | 上游生成的随机串，用于鉴权指令 | 需要管理功能时才理会 |
 | `ERROR 初始化 hikari-core 配置失败: 'NoneType' object is not iterable` | **网络完全不通**且缓存也取不到时上游的崩溃点 | **必须看**：检查代理/网络后重启 |
+| `INFO 页面 networkidle 未在 10 秒内达成（外部图标资源偏慢），已确认页面本身加载完成，继续渲染（13.0s）` | 外部图标资源慢，但页面本身正常，已直接继续渲染 | **可忽略**，见 §10.5 |
 | `ERROR` + `Traceback` 里含 `update_template` | 模板同步出现**确定性**故障（清单为空、磁盘写入失败等） | **必须看**：这类不会降级，会原样打印 |
 | `ERROR` + `Traceback` 里含 `Page.goto` / `playwright` | 渲染阶段失败 | 见 §10.4（已自动重试一次） |
 
