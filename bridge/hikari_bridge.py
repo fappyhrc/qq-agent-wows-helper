@@ -1168,6 +1168,28 @@ async def init_hikari_with_retry(*, platform: str, platform_id: str, bot_id: str
     return hikari, notes  # pragma: no cover - 循环必然在内部 return
 
 
+def _describe_output(hikari) -> str:
+    """把 "这次到底出没出图" 压成一小段短文本，供日志使用。
+
+    为什么值得单独写一个：``status=success`` **不代表有图**。上游在
+    ``output_hikari`` 里若因为 ``Output.Template`` 为空等原因跳过渲染，状态照样是
+    success，只是 ``Output.Data`` 变成了文字 —— 而日志只打 status 时这两种情况
+    完全无法区分。排查"回序号后没图"时就是卡在这里。
+
+    :param hikari: 上游的 ``Hikari_Model``。
+    :returns: 形如 ``图=208KB tpl=wws-ship-v6.html`` 或 ``无图(data=str)``；拿不到时返回空串。
+    """
+    try:
+        out = getattr(hikari, "Output", None)
+        data = getattr(out, "Data", None)
+        tpl = getattr(out, "Template", None) or "-"
+        if isinstance(data, (bytes, bytearray)):
+            return f"图={len(data) / 1024:.0f}KB tpl={tpl}"
+        return f"无图(data={type(data).__name__}) tpl={tpl}"
+    except Exception:                                            # noqa: BLE001
+        return ""
+
+
 async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: str,
                       group_id, select_index, session_key, config_overrides) -> dict:
     """执行一次查询或续查，返回已打包好的响应体。
@@ -1202,13 +1224,24 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
     started = time.time()
 
     pend = PENDING.get(session_key) if (select_index is not None and session_key) else None
+    if pend is None and select_index is not None:
+        # 续查请求但找不到挂起的会话：几乎总是"首次查询没带 session_key"，
+        # 于是桥接从未挂起候选，只能把它当成一次全新的查询 —— 用户看到的就是
+        # "回了序号又弹一次选择列表、始终没有图"。这条日志是排查该问题的第一现场。
+        logger.warning(f"收到续查（select={select_index}）但没有挂起的会话"
+                       f"（session_key={session_key!r}，PENDING={list(PENDING.keys())}）："
+                       f"将按新查询处理。请确认首次查询（status=wait）带了同一个 session_key。")
     if pend is not None:
         hikari = pend["hikari"]
         hikari.Input.Select_Index = int(select_index)
         hikari = await callback_hikari(hikari)
         PENDING.pop(session_key, None)
         elapsed = int((time.time() - started) * 1000)
-        logger.info(f"续查 select={select_index} → {hikari.Status} ({elapsed}ms)")
+        # ⚠️ 必须把"有没有出图"一起打出来。只记 status 的话，"success 但没图"和
+        #    "success 且有图"在日志里长得一模一样 —— 排查"回序号后没图"时吃过这个亏
+        #    （实测一次续查 3588ms 出图 208KB，而另一次 369ms 无图，只看 status 无法区分）。
+        logger.info(f"续查 select={select_index} → {hikari.Status} ({elapsed}ms) "
+                    f"{_describe_output(hikari)}")
         return package(hikari, command or f"select:{select_index}", elapsed, session_key)
 
     if not str(command or "").strip():
@@ -1231,7 +1264,8 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
     elapsed = int((time.time() - started) * 1000)
     if retry_notes:
         logger.info(f"重试后取得结果（此前失败 {len(retry_notes)} 次）")
-    logger.info(f"查询「{command}」platform={platform} pid={platform_id} → {hikari.Status} ({elapsed}ms)")
+    logger.info(f"查询「{command}」platform={platform} pid={platform_id} → {hikari.Status} "
+                f"({elapsed}ms) {_describe_output(hikari)}")
     result = package(hikari, command, elapsed, session_key)
     if retry_notes:
         # 把重试事实回给插件：便于在日志里解释"为什么这次慢了十几秒"

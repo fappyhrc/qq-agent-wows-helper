@@ -674,6 +674,11 @@ playwright._impl._errors.TimeoutError: Page.goto: Timeout 10000ms exceeded.
 | `INFO 页面 networkidle 未在 2000ms 内达成（外部图标资源偏慢），已确认页面本身加载完成，继续渲染（3.6s）` | 外部图标资源慢，但页面本身正常，已直接继续渲染 | **可忽略**，见 §10.5 |
 | `ERROR` + `Traceback` 里含 `update_template` | 模板同步出现**确定性**故障（清单为空、磁盘写入失败等） | **必须看**：这类不会降级，会原样打印 |
 | `ERROR` + `Traceback` 里含 `Page.goto` / `playwright` | 渲染阶段失败 | 见 §10.4（已自动重试一次） |
+| `INFO 查询「…」→ success (…ms) 图=208KB tpl=wws-ship-v6.html` | 正常结果行 | **注意结尾的"图=…/无图(…)"**：`status=success` **不代表有图**，上游可能因 `Output.Template` 为空而跳过渲染。早期日志只打 status，"success 但没图"与"success 且有图"长得一模一样 |
+| `WARNING 收到续查（select=N）但没有挂起的会话（session_key=… PENDING=[…]）` | 续查请求找不到上一轮的多选会话，只能按新查询处理 | **必须看**。几乎总是"首次查询没带 `session_key`"→ 桥接从未挂起候选 → 用户看到"回了序号又弹一次选择列表、始终没图"。这是排查该问题的第一现场 |
+
+> 「回序号后没图」这类问题，**先看这两行**：续查行有没有 `图=…`、有没有上面那条 WARNING。
+> 实测踩过：只用 `status` 判断时，一次 3588ms 出图 208KB 和一次 369ms 无图在日志里无法区分。
 
 设计要点：**"可重试"和"可降级"是两个独立判定**。只有"拉清单时连不上网"才降级成一行
 WARNING；个别模板文件下载失败、清单为空、磁盘错误等一律保留 ERROR，避免把真问题藏起来。
