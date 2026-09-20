@@ -34,6 +34,22 @@ const call = async (url, init = {}) => {
 (async () => {
   const existed = await call(`https://api.github.com/repos/${owner}/${name}`);
   if (existed.status === 200) {
+    // 仓库已存在：若带了 --public 而当前是私有，就顺手改成公开（幂等）。
+    // 之前这里只打印一行"已存在，跳过创建"，于是"想改公开"没有入口。
+    if (isPublic && existed.json.private) {
+      const patched = await call(`https://api.github.com/repos/${owner}/${name}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ private: false })
+      });
+      if (patched.status !== 200) {
+        console.error(`改为公开失败：HTTP ${patched.status} ${String(patched.text).slice(0, 300)}`);
+        process.exit(1);
+      }
+      console.log(`已改为公开：${patched.json.full_name}  private=${patched.json.private}`);
+      console.log(`地址: ${patched.json.html_url}`);
+      return;
+    }
     console.log(`已存在，跳过创建：${existed.json.full_name}（private=${existed.json.private}）`);
     console.log(`clone: ${existed.json.clone_url}`);
     return;
