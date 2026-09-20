@@ -213,6 +213,10 @@ check(!plugin.internals.pending.has('group:12345#1000000001'),
 
 console.log('— 工具：查询并自动发图 —');
 const sent = [];
+// ⚠️ 首次查询**必须**带上 session_key：桥接只有拿到它才会把多选候选挂起，
+//    否则用户回序号时桥接找不到会话，只能"再查一次"——群里表现就是
+//    "回了序号又弹出选择列表、始终没有图"（实测事故，用户日志里 PENDING 是别人的键）。
+const reqsBeforeTool = bridgeReqs.length;
 // 注意 ctx 故意**不带 senderId**：真实运行环境里就是这样，
 // 插件靠钩子记下的触发者来还原 PlatformId（这一条是关键行为，必须自检覆盖）。
 const ctx = {
@@ -230,6 +234,9 @@ const res = await tools.get('wows-query').execute(ctx, { command: 'ship 大和 r
 check(res.isError !== true, '工具执行成功', JSON.stringify(res).slice(0, 200));
 check(String(res.content).includes('胜率 54.3%'), '工具文本带数据');
 check(bridgeReqs.at(-1).platform_id === '1000000001', '工具路径用回了钩子记下的触发者（不是群号/机器人号）');
+// 首次查询带 session_key，是"续查能找到挂起会话"的前提条件
+check(typeof bridgeReqs.at(-1).session_key === 'string' && bridgeReqs.at(-1).session_key.includes('#'),
+  '首次查询带回会话键（桥接据此挂起多选候选）', JSON.stringify(bridgeReqs.at(-1).session_key));
 // 凭据随查询下发（用户在设置页填的那份）——这是"不会敲命令行"用户的唯一通路
 check(bridgeReqs.at(-1).config?.hikari_token === 'ui:token', '设置页填的 yuyuko 凭据随查询下发', JSON.stringify(bridgeReqs.at(-1).config));
 check(sent.length === 1, '自动发图被调用了一次');

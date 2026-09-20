@@ -992,6 +992,47 @@ def pending_put(key: str, hikari) -> None:
         PENDING.pop(oldest, None)
 
 
+def pending_get(key: str):
+    """按会话键取出挂起会话；精确命中失败时按 ``<chatKey>`` 回退查找。
+
+    为什么需要回退（实测踩过，导致"回序号后没图"）:
+        会话键被插件构造成 ``<chatKey>#<platformId>``，而 ``platformId`` 在**首次查询**
+        与**续查**两条路径上含义不同 ——
+
+        * 首次查询（查别人）：``platformId`` 是**被查对象**的账号（例如 2000000001）；
+        * 续查（用户回序号）：工具路径会把 ``platformId`` 解析成**触发者**（2000000002）。
+
+        于是同一个会话在两处算出两个不同的键，续查必然找不到挂起对象，
+        只能退化成"再查一次" → 群里表现就是"回了序号又弹出选择列表、始终没有图"。
+        实测日志：``PENDING=['group:1703443#2000000001']`` 而续查带的是
+        ``'group:1703443#2000000002'``。
+
+    ``#`` 之前是会话标识（群/私聊），它才是"这是哪一场对话"的可靠依据；
+    一个聊天里同时挂起多个多选会话极不常见，因此回退时取**最新**的那个。
+    精确命中永远优先，回退只在精确缺失时发生。
+
+    :param key: 插件传来的会话键。
+    :returns: 挂起的 ``hikari`` 对象；找不到返回 ``None``。
+    """
+    if not key:
+        return None
+    item = PENDING.get(key)
+    if item is not None:
+        return item['hikari']
+    chat = str(key).split('#', 1)[0]
+    if not chat:
+        return None
+    # 回退：同一会话标识下最新的挂起项
+    candidates = [(k, v) for k, v in PENDING.items() if str(k).split('#', 1)[0] == chat]
+    if not candidates:
+        return None
+    newest_key, newest = max(candidates, key=lambda kv: kv[1]['at'])
+    logger.warning(f"续查按会话键 {key!r} 没找到挂起会话，已回退到同会话的最新挂起项 "
+                   f"{newest_key!r}（首次查询与续查的 platformId 含义不同，属已知情形）")
+    PENDING.pop(newest_key, None)
+    return newest['hikari']
+
+
 def extract_options(data) -> list:
     """把 Hikari 的 ``Input.Select_Data`` 归一化为 ``[{"name": str}, ...]``。
 
@@ -1223,7 +1264,7 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
     apply_config(config_overrides)
     started = time.time()
 
-    pend = PENDING.get(session_key) if (select_index is not None and session_key) else None
+    pend = pending_get(session_key) if select_index is not None else None
     if pend is None and select_index is not None:
         # 续查请求但找不到挂起的会话：几乎总是"首次查询没带 session_key"，
         # 于是桥接从未挂起候选，只能把它当成一次全新的查询 —— 用户看到的就是
@@ -1232,10 +1273,15 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
                        f"（session_key={session_key!r}，PENDING={list(PENDING.keys())}）："
                        f"将按新查询处理。请确认首次查询（status=wait）带了同一个 session_key。")
     if pend is not None:
-        hikari = pend["hikari"]
+        hikari = pend
         hikari.Input.Select_Index = int(select_index)
         hikari = await callback_hikari(hikari)
+        # 精确键与回退键都清掉：避免同一个挂起项被回退逻辑再捞出来一次
         PENDING.pop(session_key, None)
+        if session_key:
+            chat = str(session_key).split('#', 1)[0]
+            for k in [k for k in PENDING if str(k).split('#', 1)[0] == chat]:
+                PENDING.pop(k, None)
         elapsed = int((time.time() - started) * 1000)
         # ⚠️ 必须把"有没有出图"一起打出来。只记 status 的话，"success 但没图"和
         #    "success 且有图"在日志里长得一模一样 —— 排查"回序号后没图"时吃过这个亏

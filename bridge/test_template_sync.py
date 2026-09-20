@@ -358,6 +358,34 @@ check(calls['n'] == 1, '调用了一次', f"实际 {calls['n']}")
 check(not [t for lvl, t in seen if lvl == 'ERROR'], '没有 ERROR 泄漏', f'seen={seen}')
 check(bool(warns) and '本地模板' in warns[0], '降级为一行 WARNING', f'warn={warns}')
 
+print()
+print('=== 11) 续查会话查找：精确优先、同会话回退、跨会话不串 ===')
+# 依据实测事故：会话键是 <chatKey>#<platformId>，而首次查询的 platformId 是"被查对象"，
+# 续查的 platformId 是"触发者"（工具路径）——同一个会话算出两个键，续查必然落空，
+# 群里表现就是"回了序号又弹一次选择列表、始终没有图"。
+class _FakeHikari:
+    def __init__(self, tag):
+        self.tag = tag
+
+
+bg.PENDING.clear()
+bg.pending_put('group:1#2000000001', _FakeHikari('wait-对象是别人'))
+check(bg.pending_get('group:1#2000000001').tag == 'wait-对象是别人', '精确键命中')
+check(bg.pending_get('group:1#2000000002').tag == 'wait-对象是别人',
+      '键不同但同会话 → 回退命中（这就是修复点）')
+check(bg.pending_get('group:2#2000000001') is None, '不同会话 → 不回退（不串会话）')
+check(bg.pending_get('') is None, '空键 → None')
+
+# 回退取"最新"的那一个；精确键永远优先
+bg.PENDING.clear()
+bg.pending_put('group:1#111', _FakeHikari('旧'))
+import time as _t
+_t.sleep(0.01)
+bg.pending_put('group:1#222', _FakeHikari('新'))
+check(bg.pending_get('group:1#999').tag == '新', '同会话多个挂起项时取最新')
+check(bg.pending_get('group:1#111').tag == '旧', '精确键仍然优先于"最新"')
+bg.PENDING.clear()
+
 if fails:
     print('\n失败项：')
     for f in fails:
