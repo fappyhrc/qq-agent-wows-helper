@@ -1,22 +1,30 @@
 # wows-helper bridge launcher (Windows / PowerShell)
 #
-# ASCII-only on purpose: Windows PowerShell 5.1 reads .ps1 as ANSI unless the file
-# has a BOM, so non-ASCII comments here would turn into mojibake. All Chinese docs
-# live in ../README.md instead.
+# ASCII-ONLY ON PURPOSE. Windows PowerShell 5.1 reads .ps1 files as ANSI unless the
+# file has a UTF-8 BOM, so any non-ASCII byte in here risks corrupting the parser
+# (this bit us twice: once with Chinese comments, once with mangled legacy text).
+# All Chinese documentation lives in ../README.md instead.
 #
 # Usage:
+#   powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1
 #   powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1 -Token "ACCOUNT_ID:TOKEN"
-#   powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1 -Token "..." -Port 8788 -AccessToken "mypass"
+#   powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1 -SkipInstall
+#   powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1 -ForceReinstall
 #
 # What it does:
-#   1. finds a Python >= 3.11 (3.11 / 3.12 recommended; 3.13 / 3.14 verified working)
-#   2. downloads Hikari-core-v2 source into .hikari-src and relaxes its requires-python
-#      cap (the upstream pyproject says >=3.11,<3.13, which is stricter than reality)
-#   3. installs it into .hikari-deps (--target) together with playwright chromium
-#   4. starts hikari_bridge.py in the foreground with PYTHONPATH pointing at .hikari-deps
+#   1. locate a Python >= 3.11 (3.11/3.12 recommended; 3.13/3.14 verified working)
+#   2. download Hikari-core-v2 source into .hikari-src and relax its requires-python cap
+#   3. install dependencies into .hikari-deps via `pip --target`
+#   4. ensure a chromium build is available (hikari-core downloads its own, so the
+#      playwright copy is skipped when data/wows-yuyuko/browsers already exists)
+#   5. start hikari_bridge.py in the foreground with PYTHONPATH pointing at .hikari-deps
 #
-# Note: we install with --target instead of a venv because some Windows Python builds
-# ship without ensurepip, where `python -m venv` fails.
+# Notes:
+#   * `pip --target` is used instead of a venv because some Windows Python builds ship
+#     without ensurepip, where `python -m venv` fails outright.
+#   * "already installed" is decided by actually importing hikari_core, NOT by a marker
+#     file: deps installed by hand (or an interrupted run) would otherwise trigger a
+#     full reinstall plus another 150MB chromium download on every launch.
 
 [CmdletBinding()]
 param(
@@ -28,9 +36,10 @@ param(
   [string]$Proxy = $env:WOWS_HELPER_PROXY,
   [string]$ImageType = 'jpeg',
   [string]$UseBrowser = 'chromium',
-  # 禁用的功能函数名（逗号分隔）。写操作/更新类指令想关掉就填，例：
+  # Comma-separated FUNCTION names of features to disable, e.g.
   #   -IgnoreList "set_BindInfo,change_BindInfo,delete_BindInfo"
-  # 注意传**函数名**（set_BindInfo），不是指令词（bind）—— 上游比的是函数对象。
+  # NOTE: must be function names (set_BindInfo), not command words (bind) --
+  # upstream compares function objects, so a string list silently does nothing.
   [string]$IgnoreList = $env:WOWS_HELPER_IGNORE_LIST,
   [switch]$SkipInstall,
   [switch]$ForceReinstall
@@ -45,23 +54,23 @@ $depsDir = Join-Path $pluginDir '.hikari-deps'
 $bridgeScript = Join-Path $scriptDir 'hikari_bridge.py'
 $tarball = Join-Path $pluginDir '.hikari-src.tar.gz'
 $readyMarker = Join-Path $depsDir '.ready'
+$hikariBrowsers = Join-Path $pluginDir 'data\wows-yuyuko\browsers'
+$troubleshoot = "1) python versions: py -0 ; 2) deps dir: $depsDir ; 3) full reinstall: start-bridge.ps1 -ForceReinstall"
 
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Warn2([string]$msg) { Write-Host "!!  $msg" -ForegroundColor Yellow }
 
 if (-not $Token) {
-  # 不强制：凭据也可以之后在 QQ Agent 的插件设置页里填（请求里带 hikari_token）。
-  # 这里问一次只是因为"顺手填了"能少一次来回；直接回车就跳过。
+  # Not mandatory: the credential can also be supplied later from the QQ Agent plugin
+  # settings (sent per request as hikari_token). Asking once here just saves a round trip.
   Write-Host ''
-  Write-Host 'yuyuko API credential (format  accountID:Token)' -ForegroundColor Cyan
-  Write-Host '  You can leave this EMPTY and fill it later in QQ Agent -> Plugins -> Warship Helper -> yuyuko API credential.' -ForegroundColor DarkGray
+  Write-Host 'yuyuko API credential (format: accountID:Token)' -ForegroundColor Cyan
+  Write-Host '  You may leave this EMPTY and fill it later in QQ Agent -> Plugins -> Warship Helper.' -ForegroundColor DarkGray
   try { $entered = Read-Host '  Paste it here (or press Enter to skip)' } catch { $entered = '' }
   if ($entered) { $Token = $entered.Trim() }
 }
-
 if (-not $Token) {
-  Write-Warn2 'No credential given. The bridge will still start; fill the credential in the QQ Agent plugin settings.'
-  Write-Warn2 'Alternatively restart with -Token "accountID:Token" or set the HIKARI_TOKEN environment variable.'
+  Write-Warn2 'No credential given. The bridge still starts; fill it in the QQ Agent plugin settings.'
 }
 
 Write-Step 'Locating python'
@@ -79,13 +88,13 @@ foreach ($candidate in @('py -3.12', 'py -3.11', 'py -3.13', 'py -3.14', 'py -3'
     if ($major -eq 3 -and $minor -ge 11) {
       $py = $exe; $pyArgs = $rest
       Write-Host "    found $candidate -> python $ver"
-      if ($minor -gt 12) { Write-Host "    (upstream declares 3.11-3.12; $ver works because the cap is artificial)" }
+      if ($minor -gt 12) { Write-Host "    (upstream declares 3.11-3.12; $ver works because that cap is artificial)" }
       break
     }
   }
 }
 if (-not $py) {
-  Write-Warn2 'No Python >= 3.11 found in PATH. Install Python 3.11/3.12 (or 3.13/3.14) and retry.'
+  Write-Warn2 'No Python >= 3.11 found in PATH. Install Python 3.11/3.12 (3.13/3.14 also work) and retry.'
   exit 3
 }
 
@@ -100,10 +109,10 @@ function Ensure-Source {
     Write-Warn2 "download failed: $($_.Exception.Message)"
     if (Get-Command git -ErrorAction SilentlyContinue) {
       Write-Step 'Trying git clone instead'
-      git clone --depth 1 https://github.com/wows-yuyuko/Hikari-core-v2 (Join-Path $srcDir '_clone')
-      $inner = Join-Path $srcDir '_clone'
-      Copy-Item (Join-Path $inner '*') $srcDir -Recurse -Force
-      Remove-Item $inner -Recurse -Force -ErrorAction SilentlyContinue
+      $clone = Join-Path $srcDir '_clone'
+      git clone --depth 1 https://github.com/wows-yuyuko/Hikari-core-v2 $clone
+      Copy-Item (Join-Path $clone '*') $srcDir -Recurse -Force
+      Remove-Item $clone -Recurse -Force -ErrorAction SilentlyContinue
     } else {
       Write-Warn2 'Neither download nor git available - aborting'
       exit 4
@@ -130,27 +139,73 @@ function Ensure-Source {
 
 if (-not $SkipInstall -or $ForceReinstall) {
   Ensure-Source
-  if ($ForceReinstall -or -not (Test-Path $readyMarker)) {
+
+  # Decide "already installed" by ACTUALLY IMPORTING hikari_core, not by a marker file.
+  # A marker-only check means hand-installed deps (or an interrupted run) look missing,
+  # so the script reinstalls and downloads chromium again -- which reads to the user as
+  # "double-clicked and nothing happened for ages".
+  $depsOk = $false
+  if ((-not $ForceReinstall) -and (Test-Path (Join-Path $depsDir 'hikari_core'))) {
+    $env:PYTHONPATH = $depsDir
+    $probeOut = & $py @pyArgs -c "import hikari_core; print(hikari_core.__version__)" 2>&1
+    $depsOk = ($LASTEXITCODE -eq 0)
+    if ($depsOk) {
+      $ver = $probeOut | Select-Object -Last 1
+      Write-Host "    hikari-core $ver already importable - skipping install"
+      if (-not (Test-Path $readyMarker)) { New-Item -ItemType File -Path $readyMarker -Force | Out-Null }
+    } else {
+      Write-Warn2 "found .hikari-deps but import failed, reinstalling: $($probeOut | Select-Object -Last 1)"
+    }
+  }
+
+  if ($ForceReinstall -or -not $depsOk) {
     Write-Step "Installing Hikari-core-v2 into $depsDir"
     New-Item -ItemType Directory -Force -Path $depsDir | Out-Null
     & $py @pyArgs -m pip install --disable-pip-version-check --upgrade --target $depsDir $srcDir
     if ($LASTEXITCODE -ne 0) { Write-Warn2 'pip install failed'; exit 5 }
-    Write-Step 'Downloading playwright chromium (first run, ~150MB)'
-    $env:PYTHONPATH = $depsDir
-    & $py @pyArgs -m playwright install chromium
-    if ($LASTEXITCODE -ne 0) { Write-Warn2 'playwright install failed - rendering will not work' }
     New-Item -ItemType File -Path $readyMarker -Force | Out-Null
   } else {
     Write-Host "    dependencies already present ($depsDir)"
   }
+
+  # chromium: hikari-core downloads its own build into <gamePath>/browsers and uses that
+  # one, so the playwright copy is unnecessary when that directory already exists.
+  if (Test-Path $hikariBrowsers) {
+    Write-Host '    chromium already present (data\wows-yuyuko\browsers) - skipping download'
+  } else {
+    Write-Step 'Downloading playwright chromium (first run, ~150MB)'
+    $env:PYTHONPATH = $depsDir
+    & $py @pyArgs -m playwright install chromium
+    if ($LASTEXITCODE -ne 0) { Write-Warn2 'playwright install failed - rendering will not work until it succeeds' }
+  }
+
+  # Final pre-flight: state clearly whether the bridge will actually work, rather than
+  # letting the user discover it by trying in a group chat.
+  $env:PYTHONPATH = $depsDir
+  $null = & $py @pyArgs -c "import hikari_core" 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warn2 'hikari-core is still not importable - the bridge will start with ready=false and every query will fail.'
+    Write-Warn2 "Troubleshoot: $troubleshoot"
+  }
 }
 
 Write-Step "Starting bridge on http://${BindHost}:${Port}"
-Write-Host "    Point the QQ Agent plugin setting 'bridgeUrl' at that address."
+Write-Host '    Set the QQ Agent plugin setting "bridgeUrl" to that address.'
 Write-Host '    Press Ctrl+C to stop.'
 
 $env:PYTHONPATH = $depsDir
+# Make the bridge's Chinese log lines readable.
+# Python writes UTF-8 bytes; a legacy Windows console decodes them as GBK/CP936, which
+# turns every log line into mojibake. Changing [Console]::OutputEncoding is NOT enough
+# (it only affects PowerShell's own writes) -- the console *codepage* has to change.
 $env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONUTF8 = '1'
+try {
+  Add-Type -Namespace W -Name K -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool SetConsoleOutputCP(uint id);'
+  [void][W.K]::SetConsoleOutputCP(65001)
+  [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+} catch { Write-Warn2 'could not switch the console to UTF-8; log lines may look garbled' }
+
 $bridgeArgs = @($bridgeScript, '--host', $BindHost, '--port', "$Port",
                 '--image-type', $ImageType, '--use-browser', $UseBrowser)
 if ($Token) { $bridgeArgs += @('--token', $Token) }
