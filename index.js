@@ -569,7 +569,7 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
 
   // ── 多选：把待选项挂起，等用户回序号（他下一句靠 pending 认领）──
   if (status === 'wait' && options?.length) {
-    rememberPending(sessionKey, options, c.maxPending);
+    rememberPending(sessionKey, options, c.maxPending, command);
     rememberSender(chatKey, platformId);
     const label = selectIndex == null ? command : `${command}（续查 · 选择 ${selectIndex}）`;
     const out = [
@@ -704,19 +704,22 @@ async function sendImageNow(ctx, image, { note = null, replyToMessageId = null, 
 }
 
 /**
- * 挂起一个等待用户选择的多选会话（`sessionKey → options`）。
+ * 挂起一个等待用户选择的多选会话（`sessionKey → {command, options}`）。
  *
  * @param {string} sessionKey 会话键，见 `sessionKeyOf`。
  * @param {Array} options 归一化后的待选项（桥接已裁剪为最多 12 条）。
  * @param {number} maxPending 会话数上限（配置项，默认 6）。
+ * @param {string} [command] 原始指令。**必须存**：用户回序号后要由工具带着同一个
+ *     command 发起续查（桥接按它 + sessionKey 找到挂起的候选对象），
+ *     而钩子注入的提示里也要写明这个 command。
  * @returns {void}
  *
  * @remarks TTL 固定 5 分钟：用户回序号通常只隔几十秒，再长也没有意义。
  * ⚠️ 单位是**毫秒** —— 此处曾误写成 `5 * 60 * 1000 * 1000`（等于永不过期），
  * 造成选项长期滞留，修改时请勿再加错数量级。
  */
-function rememberPending(sessionKey, options, maxPending) {
-  pending.set(sessionKey, { at: Date.now(), options });
+function rememberPending(sessionKey, options, maxPending, command = '') {
+  pending.set(sessionKey, { at: Date.now(), options, command: String(command || '') });
   const ttl = 5 * 60 * 1000;
   const now = Date.now();
   for (const [key, item] of pending) {
@@ -827,7 +830,7 @@ export const hooks = {
           // 多选：钩子路径也要挂起会话，否则用户回"2"时没人认领
           //（工具路径在 handleQuery 里挂，两条路必须都挂 —— 这是同一份状态的写入口）
           if (String(data?.status) === 'wait' && Array.isArray(data?.options) && data.options.length) {
-            rememberPending(sessionKeyOf({ chatKey: key, senderId: entry?.senderId }, c), data.options, c.maxPending);
+            rememberPending(sessionKeyOf({ chatKey: key, senderId: entry?.senderId }, c), data.options, c.maxPending, command);
             rememberSender(key, entry?.senderId);
           }
           note = buildContextNote({
@@ -877,6 +880,12 @@ export const hooks = {
 
     // ② 序号回复：不带 wws，但上一轮挂起了多选会话。
     // 同样要求 @ 了机器人（或 requireAt 关闭）—— 群里连着两句"2"太常见。
+    //
+    // ⚠️ 这里**只认领、不查询**，和 ① 的默认路径保持一致。
+    //    早期版本在这里直接 bridgeQuery + hookPrefetchTimeoutMs（3.6s）预取，
+    //    结果是"续查永远没有数据和图"：一次渲染实测 5.5~10 秒，3.6 秒必然超时，
+    //    上下文里只剩一条"续查失败"，模型只能自己编。
+    //    钩子本身还有 5 秒硬超时，所以这里也不可能等到结果 —— 必须交给工具。
     for (const entry of triggerEntries) {
       const text = String(entry?.text ?? '').trim();
       if (!text) continue;
@@ -894,37 +903,23 @@ export const hooks = {
       }
       if (entry?.id) triggerMsg.set(key, entry.id);
       rememberSender(key, senderId);
-      const c2 = cfg();
-      const plat = platformFor({ kind, chatId, selfId, senderId }, c2);
-      try {
-        const data = await withTimeout(
-          bridgeQuery({
-            url: c2.bridgeUrl,
-            token: c2.bridgeToken,
-            command: '',
-            platform: plat.platform,
-            platformId: senderId,
-            botId: c2.botId,
-            groupId: plat.groupId,
-            selectIndex: idx,
-            sessionKey,
-            runtime: c2,
-            timeoutMs: c2.hookPrefetchTimeoutMs
-          }),
-          c2.hookPrefetchTimeoutMs
-        );
-        pending.delete(sessionKey);
-        entry.text = `${text}\n\n${buildContextNote({
-          command: `（续查 · 选择 ${idx}）`,
-          data,
-          autoSendImage: c2.autoSendImage,
-          maxChars: c2.contextDataMaxChars,
-          includeData: c2.includeDataInContext,
-          requireAt: c2.requireAt
-        })}`;
-      } catch (error) {
-        entry.text = `${text}\n\n【wws 多选续查】按序号 ${idx} 续查失败：${friendlyBridgeError(error)}`;
-      }
+      // 选项名的键名与 lib/format.js 的 formatOptions 保持一致：
+      // 桥接 extract_options() 统一下发的是 {name}，这里不能再猜 label 之类的键名，
+      // 否则提示里只会剩"选项 2"这种没信息量的兜底文案。
+      const label = pl.name ?? pl.text ?? `选项 ${idx}`;
+      if (c.debug) log(`认领续查：${String(entry?.senderName ?? senderId ?? '?')} 选择 ${idx}（${label}）`);
+      // 立刻清掉挂起会话：这次续查已认领，避免群友同一句"1"连发两次被重复认领
+      // （真实的查询与挂起对象由工具带着 sessionKey 去桥接取，所以这里删掉不影响执行）
+      pending.delete(sessionKey);
+      // 上下文里带上待选项：序号不合法时模型要能把可选项原样报回去。
+      entry.text = `${text}\n\n【wws 多选续查】\n`
+        + `发起人：${String(entry?.senderName ?? senderId ?? '群友')}（QQ:${senderId}）\n`
+        + `该群友回复的是序号 ${idx}，对应：${clip(String(label), 80)}\n`
+        + `待选项：\n${formatOptions(pend.options)}\n`
+        + `请立刻调用 wows-helper__wows-query 工具执行这次续查：`
+        + `command="${pend.command || ''}"、selectIndex=${idx}。\n`
+        + '这个工具会真实查询并自动把渲染图发到群里，通常几秒；'
+        + '在它返回之前，不要凭印象说这条船的数据或结果。';
     }
   }
 };

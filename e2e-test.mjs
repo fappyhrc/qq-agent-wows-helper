@@ -35,6 +35,18 @@ const bridge = http.createServer((req, res) => {
       return;
     }
     if (payload.command === 'wait') {
+      // ⚠️ 必须区别对待"首次查询"与"带序号的续查"：
+      //    首次返回 status=wait + 待选项；带序号续查才返回 success + 渲染图。
+      //    早期假桥接对 command=wait 一律返回 wait，于是"续查拿到图"这条路径
+      //    **从来没有被测到** —— 而真实环境里正是这条路径丢了图。
+      if (payload.select_index) {
+        res.end(JSON.stringify({
+          ok: true, status: 'success',
+          text: `你选择的候选项：大和改\n玩家：老八\n胜率 51.2%  场次 300`,
+          image_base64: PNG.toString('base64'), image_mime: 'image/png', data_type: 'png'
+        }));
+        return;
+      }
       res.end(JSON.stringify({ ok: true, status: 'wait', text: '请选择', options: [{ name: '大和' }, { name: '大和改' }] }));
       return;
     }
@@ -169,7 +181,7 @@ check(prefetchEntry.text.includes('胜率 54.3%'), '预取数据进入上下文'
 check(prefetchEntry.text.includes('渲染图已由插件自动发出'), '预取路径说明图片状态');
 settings.hookPrefetch = false;
 
-console.log('— 钩子：多选 + 序号续查 —');
+console.log('— 钩子：多选 + 序号续查（钩子只认领，真查询交给工具）—');
 const waitEntry = { id: 3, senderId: '1000000001', senderName: '老八', text: `@${BOT_NICK}(QQ:${BOT_QQ}) wws wait` };
 // 多选会话是在查询时挂起的 → 这里临时开预取，让钩子把选项挂上
 settings.hookPrefetch = true;
@@ -179,14 +191,25 @@ check(waitEntry.text.includes('1. 大和'), '多选待选项进入上下文');
 const bareSel = { id: 40, senderId: '1000000001', senderName: '老八', text: '2' };
 await plugin.hooks['before-context']({ triggerEntries: [bareSel], chatKey: 'group:12345', ...ctxFields });
 check(!bareSel.text.includes('【wws 自动查询结果】'), '没 @ 的裸序号 → 不续查（避免群里"2"被误认）');
-settings.hookPrefetch = true;
+
+// ⚠️ 续查**不能**在钩子里查：钩子硬超时 5 秒，而一次渲染实测 5.5~10 秒。
+//    早期版本在这里直接预取，结果续查永远只剩一条"续查失败"，数据和图全丢。
+//    现在钩子只认领并指示模型调工具，与正常路径一致。
+const reqsBeforeSel = bridgeReqs.length;
 const selEntry = { id: 4, senderId: '1000000001', senderName: '老八', text: `@${BOT_NICK}(QQ:${BOT_QQ}) 2` };
 await plugin.hooks['before-context']({ triggerEntries: [selEntry], chatKey: 'group:12345', ...ctxFields });
-settings.hookPrefetch = false;
-check(selEntry.text.includes('【wws 自动查询结果】'), '带 @ 的序号 → 续查并注入结果', selEntry.text);
-const reqSel = bridgeReqs.at(-1);
-check(reqSel.select_index === 2, '续查带上了序号 2');
-check(reqSel.session_key === 'group:12345#1000000001', '续查带上了会话键');
+check(bridgeReqs.length === reqsBeforeSel, '钩子没有对桥接发任何查询请求（不再预取续查）',
+  `新增 ${bridgeReqs.length - reqsBeforeSel} 条`);
+check(selEntry.text.includes('【wws 多选续查】'), '钩子注入了续查认领提示', selEntry.text);
+check(selEntry.text.includes('selectIndex=2'), '提示里写明 selectIndex=2', selEntry.text);
+check(selEntry.text.includes('wows-helper__wows-query'), '提示里指明该调哪个工具', selEntry.text);
+check(selEntry.text.includes('大和改'), '提示里带上该序号对应的选项名', selEntry.text);
+check(selEntry.text.includes('command="wait"'), '提示里带上原始 command（工具需要它才能找到挂起的会话）', selEntry.text);
+// 认领后立刻清掉挂起会话：防止群友同一句"1"被重复认领。
+// 真正的挂起对象在**桥接进程**的 PENDING 里（按 session_key 取），这里删掉的只是
+// "还有没有待选会话"这个标记，不影响工具带着 selectIndex 去执行。
+check(!plugin.internals.pending.has('group:12345#1000000001'),
+  '认领后续查会话被清掉（避免重复认领）');
 
 console.log('— 工具：查询并自动发图 —');
 const sent = [];
@@ -217,6 +240,19 @@ check(ctx.session.sent.length === 1, '渲染图写进了会话留档');
 // 图片记录里同时带本地图片服务 URL（发送队列 file 通道失败时的备选来源）
 const lastImage = plugin.internals.lastResult.get('group:12345')?.image;
 check(typeof lastImage?.url === 'string' && lastImage.url.startsWith('http://127.0.0.1:32906/wows/'), '图片记录带本地图片服务 URL', JSON.stringify(lastImage?.url));
+
+console.log('— 工具：序号续查（钩子认领之后，真查询走这里）—');
+// 承接上面钩子挂起的会话：验证工具确实把 selectIndex 与 session_key 下发给桥接了。
+const sentBeforeSel = sent.length;
+const resSel = await tools.get('wows-query').execute(ctx, { command: 'wait', selectIndex: 2 });
+check(resSel.isError !== true, '续查走工具执行成功', JSON.stringify(resSel).slice(0, 200));
+const reqSelTool = bridgeReqs.at(-1);
+check(reqSelTool.select_index === 2, '续查把序号 2 下发给了桥接', JSON.stringify(reqSelTool.select_index));
+check(reqSelTool.session_key === 'group:12345#1000000001', '续查带上了会话键', JSON.stringify(reqSelTool.session_key));
+check(sent.length === sentBeforeSel + 1, '续查结果里的渲染图被自动发出（这正是原先丢图的地方）');
+// 序号越界必须被工具自己的校验拦下（不能透传给桥接换回一句难懂的报错）
+const resBadSel = await tools.get('wows-query').execute(ctx, { command: 'wait', selectIndex: 99 });
+check(resBadSel.isError === true, 'selectIndex 越界被校验拦下', String(resBadSel.content));
 
 console.log('— 工具：发送结果确实可被协议端取到 —');
 const imgRes = await fetch(lastImage.url);
