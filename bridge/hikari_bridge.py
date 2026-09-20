@@ -769,7 +769,7 @@ def _wrap_page_goto(original) -> bool:
     # `_smart_wait()`（load + 字体 + 图片解码）+ 页内背景图跟踪。原来硬等 10 秒纯属浪费：
     # 只要有一个图标挂住就吃满 10 秒，而画面早就齐了。
     # 缩短到 2 秒：给快资源留出 settle 时间，又不再为慢资源白等 10 秒。
-    # 实测依据见模块内 `_BG_IMAGE_TRACKER_JS` 的说明与 README §10.5。
+    # 实测依据见模块内 `_BG_IMAGE_TRACKER_JS` 的说明与 DEVELOPMENT.md §10.5。
     relaxed_timeout_ms = 2000
 
     async def guarded_goto(self, url, **kwargs):

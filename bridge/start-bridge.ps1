@@ -3,7 +3,7 @@
 # ASCII-ONLY ON PURPOSE. Windows PowerShell 5.1 reads .ps1 files as ANSI unless the
 # file has a UTF-8 BOM, so any non-ASCII byte in here risks corrupting the parser
 # (this bit us twice: once with Chinese comments, once with mangled legacy text).
-# All Chinese documentation lives in ../README.md instead.
+# Chinese documentation lives in ../README.md (user manual) and ../DEVELOPMENT.md (design).
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1

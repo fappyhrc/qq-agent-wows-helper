@@ -19,7 +19,7 @@
  * 钩子硬超时 5 秒（核心 `src/skills/manager.js` 的 `DEFAULT_HOOK_TIMEOUT_MS`），
  * 而实测一次 wws 查询需 5~13 秒（yuyuko API + 浏览器端模板渲染 + 截图）。
  * 预取必然超时，只会让每次 `@wws` 白等几秒再退回工具 —— 因此默认 `hookPrefetch=false`，
- * 查询交给没有时限的工具。实测数据与复核脚本见 README 与 `bridge/probe_hikari.py`。
+ * 查询交给没有时限的工具。实测数据与复核脚本见 DEVELOPMENT.md 与 `bridge/probe_hikari.py`。
  *
  * 为什么渲染图默认由插件直接发
  * ----------------------------
@@ -765,7 +765,7 @@ export const hooks = {
    * 关于"钩子里做网络请求"：默认路径**不发任何请求**（纯文本判定，微秒级）。
    * 仅当用户显式打开 `hookPrefetch` 时才限时预取（默认 3.6s、上限 4.5s，
    * 用 AbortController 真掐断，保证撞不到 5 秒硬超时）。实测一次查询需 5~13 秒，
-   * 因此该选项默认关闭 —— 依据见 README §2.3 与 §8。
+   * 因此该选项默认关闭 —— 依据见 DEVELOPMENT.md §2.3 与 §8。
    */
   'before-context': async ({ triggerEntries, chatKey, kind, chatId, selfId, selfNickname, botName, onebot } = {}) => {
     if (!Array.isArray(triggerEntries) || !triggerEntries.length) return;
@@ -861,7 +861,7 @@ export const hooks = {
         // 默认路径：钩子只做"确定性认领"，真正的查询交给 wows-query 工具。
         // 为什么不在钩子里查：一次查询要经过 yuyuko API + 浏览器渲染 + 截图，
         // 实测热态 5~13 秒（首次还要下载 chromium 与船图缓存，约 150 秒），
-        // 而钩子硬超时只有 5 秒 —— 预取必然超时，只会让每次 @wws 白等几秒（见 README §8）。
+        // 而钩子硬超时只有 5 秒 —— 预取必然超时，只会让每次 @wws 白等几秒（见 DEVELOPMENT.md §8）。
         // 这里必须把"谁在问、问的什么"写清楚 —— 工具执行时的 ctx 里没有触发者 QQ 号。
         const cmd = hit.command || '帮助';
         note = '【wws 指令已认领】\n'
