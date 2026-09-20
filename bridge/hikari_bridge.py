@@ -146,6 +146,10 @@ def parse_args(argv=None):
                         "async_update_ship_cache（注意必须用函数名，字符串列表是无效的）")
     p.add_argument("--pending-ttl", type=int, default=300, help="多选会话保留秒数，默认 300")
     p.add_argument("--max-pending", type=int, default=32, help="多选会话最多保留条数，默认 32")
+    p.add_argument("--render-retry", type=int, default=int(os.environ.get("WOWS_HELPER_RENDER_RETRY", "1")),
+                   help="渲染失败（多为瞬时的网络/超时）自动重试次数，默认 1，设 0 关闭")
+    p.add_argument("--render-retry-delay-ms", type=int, default=int(os.environ.get("WOWS_HELPER_RENDER_RETRY_DELAY_MS", "1200")),
+                   help="重试前等待毫秒数，默认 1200（给网络与浏览器一点恢复时间）")
     p.add_argument("--log-level", default=os.environ.get("WOWS_HELPER_LOG_LEVEL", "INFO"),
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="日志级别，默认 INFO")
     return p.parse_args(argv)
@@ -313,6 +317,9 @@ def apply_config(overrides: dict | None = None) -> None:
         "auto_rendering": _tri(ov.get("auto_rendering")),
         "auto_image": _tri(ov.get("auto_image")),
         "http2": _tri(ov.get("http2")),
+        # 渲染失败时不要回一坨 playwright 堆栈：上游的 render_error_fallback=True 会把它
+        # 归一化成一条 BrowserRenderError 文本，我们才能据此识别"这是渲染失败、可以重试"。
+        "render_error_fallback": True,
     }
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     # ⚠️ 参数名兼容：hikari-core 的 `set_hikari_config` 把浏览器参数拼成了 `use_broswer`（少一个 w）。
@@ -483,6 +490,76 @@ def package(hikari, command: str, elapsed_ms: int, session_key: str | None = Non
     return resp
 
 
+# ── 渲染失败的识别与重试 ──────────────────────────────────────────────────────
+# 背景（实测）：上游渲染使用 `page.goto(wait_until='networkidle', timeout=10000)` ——
+# 硬编码 10 秒、且要求"500ms 内没有任何网络请求在飞"。模板会加载十余个远程资源
+# （舰船图/国家旗/前端库，见 Template/*.html），网络稍有抖动就会触发超时；
+# 上游**没有重试**，一次抖动就直接变成一条错误回复。
+#
+# 实测到的两类瞬时失败（同一条指令一次失败、下一次却成功）：
+#   1. "playwright错误…Page.goto: Timeout 10000ms exceeded"（渲染超时）
+#   2. "wuwuwu出了点问题，请联系麻麻解决"（上游兜底的 except Exception，多为网络类异常）
+#
+# 这两类都不代表指令有问题，重试一次通常就过。因此在这里补一层重试：
+# 与"指令错误/玩家不存在"这类确定性失败严格区分开，后者绝不重试。
+RENDER_RETRY_MARKERS = (
+    'playwright错误',
+    'Page.goto',
+    'Timeout',
+    '超时',
+    'BrowserRenderError',
+    '模板渲染错误',
+    '浏览器端渲染',
+    'wuwuwu出了点问题',
+)
+
+
+def is_render_failure(payload: dict) -> bool:
+    """判断一次查询结果是不是"渲染阶段"的失败（即重试可能有意义的那种）。
+
+    :param payload: ``package()`` 产出的响应体。
+    :returns: 命中渲染失败特征时为 True；``failed``（玩家不存在等业务失败）永远为 False。
+    """
+    if str(payload.get('status')) == 'failed':
+        # failed = 上游明确告知业务失败（如"未找到该玩家"），重试无意义
+        return False
+    if str(payload.get('status')) not in ('error',):
+        return False
+    text = str(payload.get('text') or '')
+    return any(marker in text for marker in RENDER_RETRY_MARKERS)
+
+
+async def init_hikari_with_retry(*, platform: str, platform_id: str, bot_id: str,
+                                 command: str, group_id, attempts: int = 1,
+                                 delay_ms: int = 1200) -> tuple[object, list]:
+    """执行 ``init_hikari``，渲染失败时按 ``attempts`` 重试。
+
+    :param attempts: 额外重试次数（0 = 只跑一次）。
+    :returns: ``(hikari, notes)``；``notes`` 记录每次尝试的失败原因，供日志与回显。
+    :side effect: 重试之间 ``await asyncio.sleep``（不阻塞事件循环，其他会话仍可查询）。
+    """
+    notes: list[str] = []
+    for i in range(max(1, attempts + 1)):
+        hikari = await init_hikari(
+            platform=platform,
+            PlatformId=str(platform_id),
+            BotId=str(bot_id),
+            command_text=str(command),
+            GroupId=(str(group_id) if group_id not in (None, "") else None),
+            # 禁用清单（可选）。必须传**函数对象**，传字符串无效 —— 见 resolve_ignore_list
+            Ignore_List=ACTIVE_IGNORE or None,
+        )
+        payload = package(hikari, command, 0)
+        if i < attempts and is_render_failure(payload):
+            reason = str(payload.get('text') or '').splitlines()[0][:160]
+            notes.append(reason)
+            logger.warning(f"渲染失败，准备重试（{i + 1}/{attempts}）：{reason}")
+            await asyncio.sleep(max(0, delay_ms) / 1000)
+            continue
+        return hikari, notes
+    return hikari, notes  # pragma: no cover - 循环必然在内部 return
+
+
 async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: str,
                       group_id, select_index, session_key, config_overrides) -> dict:
     """执行一次查询或续查，返回已打包好的响应体。
@@ -534,18 +611,25 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
     if session_key:
         PENDING.pop(session_key, None)
 
-    hikari = await init_hikari(
+    hikari, retry_notes = await init_hikari_with_retry(
         platform=platform,
-        PlatformId=str(platform_id),
-        BotId=str(bot_id),
-        command_text=str(command),
-        GroupId=(str(group_id) if group_id not in (None, "") else None),
-        # 禁用清单（可选）。必须传**函数对象**，传字符串无效 —— 见 resolve_ignore_list
-        Ignore_List=ACTIVE_IGNORE or None,
+        platform_id=platform_id,
+        bot_id=bot_id,
+        command=command,
+        group_id=group_id,
+        attempts=max(0, int(ARGS.render_retry)),
+        delay_ms=max(0, int(ARGS.render_retry_delay_ms)),
     )
     elapsed = int((time.time() - started) * 1000)
+    if retry_notes:
+        logger.info(f"重试后取得结果（此前失败 {len(retry_notes)} 次）")
     logger.info(f"查询「{command}」platform={platform} pid={platform_id} → {hikari.Status} ({elapsed}ms)")
-    return package(hikari, command, elapsed, session_key)
+    result = package(hikari, command, elapsed, session_key)
+    if retry_notes:
+        # 把重试事实回给插件：便于在日志里解释"为什么这次慢了十几秒"
+        result['retried'] = len(retry_notes)
+        result['retry_reasons'] = retry_notes
+    return result
 
 
 # ── HTTP 服务（标准库 asyncio，不引入 Web 框架）────────────────────────────────────

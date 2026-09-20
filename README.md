@@ -206,6 +206,8 @@ python plugins/wows-helper/bridge/hikari_bridge.py
 | `--image-type` | `jpeg` | `jpeg`（快、小）/ `png`（清晰、大）/ `webp` |
 | `--use-browser` | `chromium` | 渲染异常时可换 `firefox` |
 | `--command-language` | `zh` | 指令提示语言 `zh` / `en` |
+| `--render-retry` | `1` | 渲染失败自动重试次数（`0` 关闭），见 §10.4 |
+| `--render-retry-delay-ms` | `1200` | 重试前等待毫秒数 |
 | `--log-level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 
 ### 4.3 禁用写操作类指令（`--ignore-list`）
@@ -488,10 +490,12 @@ node plugins/wows-helper/bridge/verify_node.mjs 32941 "账号ID:Token" python
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 回复中出现"还没有配置 yuyuko API 凭据" | 插件设置未填，且桥接未以 `-Token` 启动 | 在插件设置页填写「yuyuko API 凭据」，填完无需重启 |
+| 回复中出现 `page.goto Timeout 10000ms` / `playwright错误` | **渲染阶段的瞬时失败**（模板要加载十余个远程资源，网络抖动即超时） | 已内置自动重试一次（§10.4）；若频繁出现请检查网络与代理 |
+| 回复中出现 `wuwuwu出了点问题，请联系麻麻解决` | 上游的兜底异常（多为网络类），异常详情在**桥接窗口**的日志里 | 同上；要定位具体原因需查看桥接窗口中的 `Traceback` |
 | 发 `@机器人 wws 大和` 完全无反应 | 插件未启用 / 未 @ 机器人 / 触发词不在最前 | 确认「插件」页状态为"生效中"；打开 `debug`，日志会写明具体原因 |
 | @ 他人时机器人不响应 | **设计如此**：仅认领 @ 机器人本人的消息 | 需要放宽则关闭 `requireAt` |
 | 已认领但模型未查询、只回一句空话 | 模型未调用工具 | 提示词片段已写死该要求；`debug` 日志可确认是否发起查询 |
-| 返回"桥接服务没启动或地址不对" | 桥接未运行 / 端口不一致 | 启动 `hikari_bridge.py`，核对 `bridgeUrl` |
+| 返回"桥接服务没启动或地址不对" | 桥接未运行 / 端口不一致 | 启动 `hikari_bridge.py`（或双击 `启动桥接服务.bat`），核对 `bridgeUrl` |
 | 返回"响应超时" | 首次查询需下载浏览器与船图缓存 | 调大 `requestTimeoutMs`；或先运行一次 `probe_hikari.py` 预热 |
 | 上下文出现"预取超时" | 开启了 `hookPrefetch` 但查询较慢 | 关闭该项（默认已关闭），交给工具执行 |
 | `/health` 返回 `ready: false` | 未装 hikari-core 或 chromium | 重新运行 `start-bridge.ps1`；查看 `core_error` 字段 |
@@ -502,6 +506,37 @@ node plugins/wows-helper/bridge/verify_node.mjs 32941 "账号ID:Token" python
 
 排障时建议先开启插件的 `debug` 开关：日志会记录认领了哪条指令（含判定原因）、
 是否发起查询、耗时以及图片大小。
+
+### 10.4 渲染失败与自动重试
+
+实测发现渲染失败是**瞬时且可复现**的：对同一条指令连查三次，会出现"失败 / 失败 / 成功"
+这种不确定结果。原因在上游：
+
+```python
+# hikari_core/Html_Render/minimal_screens_hot_service.py:382
+await page.goto(f"file://{temp_file}",
+                wait_until='networkidle',   # 要求 500ms 内没有任何网络请求在飞
+                timeout=10000)              # 硬编码 10 秒，无法从外部调大
+```
+
+模板会加载十余个远程资源（`hikari-resource` OSS 16 处、`jsdelivr` 6 处、
+`bootcdn` 2 处），网络稍有抖动就触发超时；而**上游没有任何重试逻辑**，
+一次抖动直接变成一条错误回复。
+
+因此桥接层补了一层重试（默认开启，重试 1 次、间隔 1200ms）：
+
+| 失败类型 | 是否重试 | 原因 |
+|---|---|---|
+| `playwright错误` / `Page.goto Timeout` / `浏览器端渲染超时` | ✅ 重试 | 典型的瞬时失败 |
+| `wuwuwu出了点问题`（上游兜底异常，多为网络类） | ✅ 重试 | 同上 |
+| `status=failed`（如"未找到该玩家"） | ❌ **不重试** | 业务性失败，重查无意义 |
+| 正常成功 | ❌ | — |
+
+关闭方式：`--render-retry 0`，或设置环境变量 `WOWS_HELPER_RENDER_RETRY=0`。
+发生重试时，响应体会附带 `retried` 与 `retry_reasons`，便于解释"这次为什么慢了些"。
+
+> 相关自检：`python bridge/test_render_retry.py`（用真实错误文案驱动，
+> 覆盖失败识别、重试后成功、用尽次数、可关闭，以及"业务失败不重试"这一关键约束）。
 
 ---
 
