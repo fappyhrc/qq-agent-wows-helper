@@ -1,30 +1,44 @@
-// 战舰世界助手（wows-helper）· 确定性认领 + LLM 接话
-//
-// ── 这个插件解决的到底是什么问题 ───────────────────────────────────────────
-// 群里喊一句「@机器人 wws 大和」，期望是"查得到、画得出、发得出去"。链路拆成两段：
-//
-//   ① **确定性一段** —— `before-context` 钩子负责认领：判定「@ 了机器人本人」+「第一个词是 wws」，
-//      记下发起的 QQ 号，并把「该调哪个工具、参数是什么」写进这一批上下文。
-//      规则能写死（就是几个 if），漏认领就没有下文 → 必须走钩子，不经模型。
-//   ② **LLM 一段** —— 模型据此调用 `wows-query` 工具（工具是模型唯一能主动发起查询的入口），
-//      拿到真实数据后自己决定怎么接话。
-//
-// ⚠️ 查询为什么不放在钩子里：钩子硬超时 5 秒（manager.js 的 DEFAULT_HOOK_TIMEOUT_MS），
-//    而实测一次 wws 查询要 5~13 秒（yuyuko API + 浏览器端模板渲染 + 截图），
-//    预取必然超时、只会白等。所以 `hookPrefetch` 默认关闭，查询交给没有时限的工具。
-//    相关实测数据见 README §1 与 bridge/probe_hikari.py。
-//
-// ── 图片为什么默认由插件直接发 ───────────────────────────────────────────
-// 模型看不到图片内容。把"这张渲染图要不要发"交给它判断，实测结果就是
-// "图躺在缓存里、群里什么都没有"。所以默认 autoSendImage=true：查询成功即走
-// `ctx.sender.sendImage`（队列 → 限频 → 去重 → 留档），模型只负责接话。
-// 关掉后工具返回里会写明"渲染图尚未发送"，并给出工具名。
-//
-// ── 边界（它不做什么）──────────────────────────────────────────────────────
-//   · 不直连 yuyuko API：指令解析与模板渲染都在 Python 侧的 Hikari-core-v2，
-//     这里只通过 bridge/hikari_bridge.py 这个本地桥接调用它（超时、探活、降级都在这层）。
-//   · 不绕过发送队列：图片一律走 ctx.sender.sendImage，不碰 onebot.send*。
-//   · 不在钩子里发消息、不重试：钩子只做认领与本批上下文加工。
+/**
+ * 战舰世界助手（wows-helper）· 插件入口
+ * =====================================
+ *
+ * 职责
+ * ----
+ * 让群里一句「@机器人 wws 大和」变成"查得到、画得出、发得出去"，并把链路拆成两段，
+ * 各用各的扩展机制（对照 `doc/extend_development/plugin-development.md` §0/§2）：
+ *
+ * 1. **确定性一段** —— `before-context` 钩子负责**认领**。
+ *    判定条件能写成 if（「@ 了机器人本人」+「去掉 @提及 后第一个词是 wws」），
+ *    漏认领就没有下文，因此必须走钩子、不经模型。钩子同时把
+ *    「谁在问、问的什么、该调哪个工具」写进本批上下文。
+ * 2. **LLM 一段** —— 模型据此调用 `wows-query` 工具。
+ *    工具是模型唯一能主动发起查询的入口；拿到真实数据后由模型决定怎么接话。
+ *
+ * 为什么查询不放在钩子里
+ * ----------------------
+ * 钩子硬超时 5 秒（核心 `src/skills/manager.js` 的 `DEFAULT_HOOK_TIMEOUT_MS`），
+ * 而实测一次 wws 查询需 5~13 秒（yuyuko API + 浏览器端模板渲染 + 截图）。
+ * 预取必然超时，只会让每次 `@wws` 白等几秒再退回工具 —— 因此默认 `hookPrefetch=false`，
+ * 查询交给没有时限的工具。实测数据与复核脚本见 README 与 `bridge/probe_hikari.py`。
+ *
+ * 为什么渲染图默认由插件直接发
+ * ----------------------------
+ * 模型看不到图片内容。把"这张图要不要发"交给它判断，实测结果是"图躺在缓存里、
+ * 群里什么都没有"。因此默认 `autoSendImage=true`：查询成功即走
+ * `ctx.sender.sendImage`（发送队列 → 限频 → 去重 → 留档），模型只负责接话。
+ * 关闭后，工具返回里会写明"渲染图尚未发送"并给出工具名。
+ *
+ * 边界（本模块不做什么）
+ * ----------------------
+ * * 不直连 yuyuko API —— 指令解析与模板渲染都在 Python 侧，只经本地桥接调用；
+ * * 不绕过发送队列 —— 图片一律走 `ctx.sender.sendImage`，不碰 `onebot.send*`；
+ * * 不在钩子里发消息、不重试 —— 钩子只做认领与本批上下文加工。
+ *
+ * 模块导出
+ * --------
+ * `setup` / `activate` / `deactivate` / `dispose` / `available` 为插件生命周期；
+ * `hooks` 提供 `before-context`；`internals` 仅导出给自检脚本，不参与运行时。
+ */
 import { bindConfig, cfg } from './lib/config.js';
 import { matchTrigger, parseSelectIndex, isBotMentioned, extractMentions } from './lib/trigger.js';
 import { bridgeQuery, bridgePing, friendlyBridgeError, isTokenMissing, TOKEN_MISSING_TEXT } from './lib/bridge.js';
@@ -32,28 +46,33 @@ import { saveImage, attachUrl, clearAll, prune } from './lib/image-store.js';
 import * as imageServer from './lib/image-server.js';
 import { buildContextNote, formatResultText, clip, waitingHint, formatOptions } from './lib/format.js';
 
+// ── 模块级状态 ────────────────────────────────────────────────────────────────
+// 这些都是"当前进程的运行态"，全部带容量/TTL 上限；deactivate 与 dispose 里会清空，
+// 避免禁用后重新启用还拿着过期数据，也避免长时间运行导致内存增长。
+
+/** 日志出口，由 `setup(api)` 注入（带 `[skill:wows-helper]` 前缀）。 */
 let log = () => {};
 let warn = () => {};
 
-/** wws 需要用户选择时挂起的会话：key → { at, options }。容量与时间都有限，防内存增长。 */
+/** 多选会话：`会话键 → { at, options }`。用户回序号后据此续查。 */
 const pending = new Map();
 
-/** 最近一次查询结果：按会话保存，供"模型想补发这张图"时取用。 */
-const lastResult = new Map();     // chatKey → { at, text, dataType, command, image }
+/** 最近一次查询结果：`chatKey → { at, text, dataType, command, image }`，供补发图片用。 */
+const lastResult = new Map();
 
 /**
- * 本轮触发消息的 id：chatKey → messageId。
- * 只为一件事存在 —— `replyToTrigger` 打开时，自动发出的图能引用那句"wws xxx"。
- * 钩子里拿得到（triggerEntries[].id），工具执行时那个上下文已经没了，所以要在这里过一手。
+ * 本轮触发消息的 id：`chatKey → messageId`。
+ * 唯一用途：`replyToTrigger` 打开时，自动发出的图能引用那句"wws xxx"。
+ * 钩子里拿得到（`triggerEntries[].id`），工具执行时该上下文已不存在，故在此过一手。
  */
 const triggerMsg = new Map();
 
 /**
- * 最近一次 wws 触发者：chatKey → senderId。
+ * 最近一次 wws 触发者：`chatKey → senderId`。
  *
- * 为什么必须记：工具执行时的 `ctx` 里**没有触发者 QQ 号**（只有 chatKey/chatId/selfId）。
- * 而 wws 的绑定是按 PlatformId 查的，用群号或机器人号去查必然查不到别人的水表。
- * 所以钩子认领时把 senderId 存下来，工具路径再取回去 —— 两条路必须查到同一个人。
+ * 必须记录的原因：工具执行时拿到的 `ctx` 里**没有触发者 QQ 号**
+ * （只有 `chatKey` / `chatId` / `selfId`），而 wws 的账号绑定正是按 PlatformId 查询。
+ * 用群号或机器人号去查必然查到别人（或查不到）。钩子认领时存下，工具路径再取回。
  */
 const triggerSender = new Map();
 
@@ -73,24 +92,32 @@ let probeFailedAt = 0;
  */
 const selfInfo = { id: '', nickname: '', at: 0, triedAt: 0 };
 
-/** 从一条已被 @ 的消息里学习机器人身份（文本里形如 `@昵称(QQ:机器人QQ)`）。 */
+/**
+ * 从一条消息里学习机器人自身身份（文本形如 `@昵称(QQ:机器人QQ)`）。
+ *
+ * 分两级：优先采信调用方传入的 `selfId`（即钩子上下文的 `ctx.selfId`）；
+ * 没有时退化到"推断"—— 依据官方语义，`@机器人 wws <指令>` 中
+ * **紧邻触发词的最后一个 @提及**就是机器人本人。
+ *
+ * @param {string} text 消息原文。
+ * @param {string} [selfId] 来自上下文的机器人 QQ 号；为空则走推断分支。
+ * @returns {void} 结果写入模块级 `selfInfo`。
+ *
+ * @remarks
+ * **只学 QQ 号，绝不学昵称。** `@机器人 wws 大和` 里"@ 后面那个名字"确实是机器人，
+ * 但 `@群友 wws 大和`（查别人水表）中同一位置是**别人的名字**。一旦把它记成机器人昵称，
+ * 之后所有 `@那个群友` 都会被误判为"@ 了我"。QQ 号无此问题：它是被 @ 者的真实身份。
+ * 昵称只从可信来源取：钩子上下文的 `selfNickname`/`botName`，或 `get_login_info`。
+ */
 function learnSelfId(text, selfId) {
   if (selfInfo.id) return;
-  // ⚠️ 位数不设下限：短号/测试号（如 selfId='1'）也是合法 QQ 号
+  // ⚠️ 位数不设下限：短号/测试号（如 selfId='1'）同样是合法 QQ 号
   if (selfId && /^\d{1,15}$/.test(String(selfId))) {
     selfInfo.id = String(selfId);
     selfInfo.at = Date.now();
     return;
   }
-  // 钩子上下文里没有 selfId 时的兜底：靠"紧邻触发词的最后一个 @提及"推断。
-  // 依据是官方语义 —— `@机器人 wws <指令>` 里，机器人一定是紧邻触发词的那个 @。
-  //
-  // ⚠️ 只学 **QQ 号**，绝不学昵称：
-  //    `@机器人 wws 大和` 的文本里，机器人的名字恰好是"@ 后面那个名字"，
-  //    但如果有人写成 `@群友 wws 大和`（问别人的水表），这个位置就是**别人的名字**。
-  //    一旦把它当成机器人昵称，"@那个群友"以后都会被误判成"@ 了我"。
-  //    QQ 号则没有这个问题：它是被 @ 者的真实身份，纯数字也不会和别人撞。
-  //    昵称只从可信来源取：钩子上下文的 selfNickname / botName，或 get_login_info。
+  // 走推断分支：`@机器人 wws <指令>` 中紧邻触发词的那个 @ 即机器人
   if (!text) return;
   const parsed = extractMentions(String(text).replace(/^[\s\u200b\u200e\u200f\ufeff]+/, ''));
   if (!parsed.mentions.length) return;
@@ -144,6 +171,18 @@ async function probeSelfIdentity(ctx = {}) {
   } catch { /* 拿不到就算了：文本里学到的身份已经够用 */ }
 }
 
+/**
+ * 插件加载入口（核心在动态 import 后调用一次）。
+ *
+ * @param {object} api 核心注入的 Skill API（`config` / `log` / `warn` / `registerTool` 等）。
+ * @returns {void}
+ * @side effect 绑定配置读取器、注入日志出口、注册 2 个工具，并在**凭据未配置时提前告警**。
+ *
+ * @remarks
+ * 这里不启动任何需要显式停止的东西（定时器、监听端口）—— 那些放 `activate`。
+ * 因为热重载的顺序是"先 deactivate+dispose 旧实例，再 setup 新实例"，
+ * 在 setup 里启动常驻资源会导致重载时端口/句柄泄漏。
+ */
 export function setup(api) {
   bindConfig(api.config);
   log = (...a) => api.log(...a);
@@ -151,37 +190,58 @@ export function setup(api) {
   imageServer.setLog((m) => api.log(m));
   registerTools(api);
   api.log('已加载：@wws 指令将交给 Hikari 桥接服务查询并渲染出图');
-  // 凭据还没配时先说一声：这是首次使用最常见的拦路虎，等到群里报错就太晚了
-  const c = cfg();
-  if (!c.yuyukoToken) {
+  // 凭据未配置是首次部署最常见的拦路虎：在加载时就提示，比等群里报错早一步
+  if (!cfg().yuyukoToken) {
     api.warn('还没填「yuyuko API 凭据」（账号ID:Token）——请到本插件设置里填写，'
       + '或在启动桥接服务时用 -Token / 环境变量 HIKARI_TOKEN 提供。填完无需重启。');
   }
   void probeBridge();
 }
 
+/**
+ * 插件被启用时调用：启动本地图片服务并做一次后台探活。
+ *
+ * 图片服务的作用是让渲染图能通过 URL 被取用（发送队列的效率通道、以及协议端
+ * 与本机不同机时的回退通道）；端口被占用时 `imageServer.start` 会自行降级，
+ * 不影响其他功能。
+ *
+ * @returns {Promise<void>}
+ */
 export async function activate() {
   const c = cfg();
   if (c.serveImage) {
     await imageServer.start({ host: c.imageServerHost, port: c.imageServerPort, ttlSec: c.imageTtlSec });
   }
-  // 后台探活：不阻塞启动，结果只用来把错误提示写得更准确。
+  // 后台探活：不阻塞激活流程，结果只用于把错误提示写得更准确
   void probeBridge();
 }
 
+/**
+ * 插件被禁用时调用：停止图片服务并清空运行态。
+ *
+ * 必须清理的原因：这些 Map 缓存的是"当前进程内有效"的会话与图片记录，
+ * 禁用后若不清空，重新启用时会拿着过期选项去续查、或误判"这张图已经发过"。
+ * 渲染图本身不立即删除，仍在 TTL 内（协议端可能正在取图）。
+ *
+ * @returns {Promise<void>}
+ */
 export async function deactivate() {
   await imageServer.stop();
-  // 钩子里挂起的会话属于"当前进程的运行态"，禁用即清空 ——
-  // 否则重新启用后会拿着过期选项去查。
   pending.clear();
   lastResult.clear();
   triggerMsg.clear();
   triggerSender.clear();
-  // 渲染图仍留在 TTL 内（协议端可能还在取图），只清理超量的部分。
-  const c = cfg();
-  prune(c.imageTtlSec, 20);
+  prune(cfg().imageTtlSec, 20);
 }
 
+/**
+ * 插件被卸载（或热重载替换）时调用：清空全部缓存并删除暂存的渲染图文件。
+ *
+ * 与 `deactivate` 的区别：这里连磁盘上的临时图片也一并清掉（`clearAll`），
+ * 避免反复热重载在系统临时目录里堆积文件。
+ *
+ * @returns {void}
+ */
 export function dispose() {
   pending.clear();
   lastResult.clear();
@@ -191,17 +251,17 @@ export function dispose() {
 }
 
 /**
- * 可用性自检必须**同步**（判定链是同步的，返回 Promise 会被当成"可用"）。
- * 这里用"首次乐观放行 + 后台探测 + 缓存结果"：没探出问题之前不拦人，
- * 探到桥接不通就给出确切原因，比让每句话都失败一遍强。
+ * 可用性自检。**必须同步** —— 核心的判定链是同步的，返回 Promise 会被当成"可用"。
+ *
+ * 采用"首次乐观放行 + 后台探测 + 结果缓存"：在探出问题之前不阻断用户，
+ * 探到不通则给出确切原因，并允许 60 秒后重试（用户可能刚把桥接服务起起来）。
+ *
+ * @returns {{ok: boolean, reason?: string}} `ok` 为 false 时 `reason` 会显示在「插件」页。
  */
 export function available() {
   const c = cfg();
   if (!c.bridgeUrl) return { ok: false, reason: '未配置 Hikari 桥接服务地址' };
-  // 凭据没填时**照常放行**（桥接可能自己带着 --token 启动），
-  // 但把原因写进 reason，让「插件」页能一眼看到"还差什么"。
   if (bridgeOk === false && !bridgeProbing) {
-    // 探测失败后允许一段时间后重试，避免用户把服务起好了插件还不认
     const now = Date.now();
     if (!probeFailedAt || now - probeFailedAt > 60000) {
       probeFailedAt = 0;
@@ -212,6 +272,16 @@ export function available() {
   return { ok: true };
 }
 
+/**
+ * 探测桥接服务可用性并缓存结果（并发去重，同一时刻只跑一次）。
+ *
+ * 除了记住 `bridgeOk`，还承担两件"把话说在前面"的事：
+ * * 桥接在但依赖未就绪（`ready=false`）时给出提示；
+ * * 桥接报告 `token_configured=false` 且插件也没填凭据时，明确告知去哪填。
+ *
+ * @returns {Promise<void>}
+ * @side effect 更新 `bridgeOk` / `probeFailedAt`，并通过 `log`/`warn` 输出。
+ */
 async function probeBridge() {
   if (bridgeProbing) return;
   bridgeProbing = true;
@@ -241,10 +311,21 @@ async function probeBridge() {
 
 // ── 工具 ────────────────────────────────────────────────────────────────────
 
+/**
+ * 注册本插件的 2 个工具。
+ *
+ * 工具是模型唯一能主动发起查询/发图的入口 —— 能力（providers）对模型完全不可见。
+ * 工具 id 只写短名，核心会加 `wows-helper__` 前缀（双下划线），
+ * 且只允许 `[a-zA-Z0-9_-]`：带 `:` 或 `.` 会被严格端点以 400 拒掉整个请求。
+ *
+ * @param {object} api 核心注入的 Skill API。
+ * @returns {void}
+ */
 function registerTools(api) {
   api.registerTool({
     id: 'wows-query',
     name: '战舰世界查询',
+    // description 是模型判断"要不要调用"的唯一依据，必须同时写清"做什么"与"何时用"
     description:
       '查询战舰世界（World of Warships）玩家/舰船/军团/排行榜数据，数据来自 Hikari-core-v2（yuyuko 平台），'
       + '结果通常会被渲染成图片。参数 command 只填 wws 后面的部分，不要带 wws 前缀。'
@@ -267,17 +348,22 @@ function registerTools(api) {
         },
         selectIndex: {
           type: 'number',
-          description: '可选：上一轮结果提示"需要用户回复序号"时，把用户回复的序号填这里继续查询。'
+          description: '可选：上一轮结果提示"需要用户回复序号"时，把用户回复的序号填这里继续查询（1~30）。'
         }
       },
       required: ['command']
     },
+    /**
+     * @param {object} ctx 运行上下文（含 sender / chatKey / session，用于发图与留档）。
+     * @param {{command: string, platformId?: string, selectIndex?: number}} args 模型给出的参数。
+     * @returns {Promise<{content: string, isError?: boolean}>} 文本面向**模型**，不是直接发群的话。
+     */
     async execute(ctx, args) {
       try {
         const command = String(args?.command ?? '').trim();
         if (!command) return { content: '缺少 command：请填 wws 后面的指令正文，例如 "大和" 或 "帮助"。', isError: true };
-        // 序号必须是 1~30 的正整数（与 lib/trigger.js 的 parseSelectIndex 同一口径）：
-        // 模型可能给 0 / 负数 / 99，直接透传给桥接只会换回一句难懂的报错。
+        // 序号口径必须与 lib/trigger.js 的 parseSelectIndex 一致（1~30）：
+        // 模型可能给 0 / 负数 / 99，直接透传给桥接只会换回一句难懂的报错
         let selectIndex = null;
         if (args?.selectIndex != null && args.selectIndex !== '') {
           const n = Number(args.selectIndex);
@@ -295,6 +381,7 @@ function registerTools(api) {
         });
         return { content: res.text, isError: !res.ok };
       } catch (error) {
+        // 自己兜住异常并返回人话：抛出会被外层包成 {content:'错误：...'}，可读性略差
         return { content: `战舰世界查询失败：${error?.message ?? error}`, isError: true };
       }
     }
@@ -316,21 +403,27 @@ function registerTools(api) {
         atUserId: { type: ['integer', 'string'], description: '可选：@ 某人（填 QQ 号）' }
       }
     },
+    /**
+     * @param {object} ctx 运行上下文（需 `sender.sendImage`）。
+     * @param {{note?: string, replyToMessageId?: (number|string), atUserId?: (number|string)}} args
+     * @returns {Promise<{content: string, isError?: boolean}>}
+     *
+     * @remarks 正常路径下图片已由 `handleQuery` 自动发出，本工具只在
+     * `autoSendImage=false` 或用户明确要求重发时才会被调用。去重命中不算失败。
+     */
     async execute(ctx, args) {
       try {
-        const c = cfg();
         const last = lastResult.get(String(ctx.chatKey ?? ''));
         if (!last?.image) return { content: '还没有可发送的战舰世界渲染图 —— 先用 wows-query 查一次。', isError: true };
         if (!ctx.sender?.sendImage) return { content: '当前运行环境没有发送队列，无法发图。', isError: true };
         const info = await sendImageNow(ctx, last.image, {
           note: args?.note,
           replyToMessageId: args?.replyToMessageId ?? null,
-          atUserId: args?.atUserId ?? null,
-          platformId: last.image.platformId
+          atUserId: args?.atUserId ?? null
         });
         if (!info.ok) {
-          // 去重拦下不是"失败"：同一张图刚发过，如实说明即可，不必让模型重试
-          return { content: info.skipped ? `这张渲染图刚刚发过，已跳过重复发送。` : `渲染图发送失败：${info.error}`, isError: !info.skipped };
+          // 被去重拦下不是"失败"：同一张图刚发过，如实说明即可，不必让模型重试
+          return { content: info.skipped ? '这张渲染图刚刚发过，已跳过重复发送。' : `渲染图发送失败：${info.error}`, isError: !info.skipped };
         }
         last.image.sent = true;
         last.image.sentAt = Date.now();
@@ -345,12 +438,18 @@ function registerTools(api) {
 // ── 查询主流程 ──────────────────────────────────────────────────────────────
 
 /**
- * 解析 Hikari 需要的平台身份。
+ * 解析 Hikari 需要的平台身份三元组。
  *
- * PlatformId 必须是**触发者本人**：wws 的绑定（bind）是按 PlatformId 存的，
- * 传群号会让"我的水表"变成"群号的水表"（查不到或串号）。
- *   · 群聊：用消息里的 senderId
- *   · 私聊：会话对方就是发送者，chatId 即其人
+ * `PlatformId` 必须是**触发者本人**：wws 的账号绑定（bind）按 PlatformId 存储，
+ * 传群号会把"我的水表"变成"群号的水表"；传机器人自己的号则会查到机器人账号。
+ *
+ * @param {{kind?: string, chatId?: string, selfId?: string, senderId?: string}} [ctxFields]
+ *   `kind` 为 `'group'`/`'private'`；`senderId` 来自消息本身。
+ * @param {object} c 归一化配置（用其 `platform` 与 `platformIdOverride`）。
+ * @returns {{platform: string, platformId: string, groupId: (string|null)}} 传给桥接的身份字段。
+ *
+ * @remarks 取值顺序：消息发送者 → （私聊）会话对方 → 机器人自己。
+ * 最后一级只是兜底，正常情况下不会用到；`platformIdOverride` 配置项可强制覆盖。
  */
 function platformFor({ kind = 'group', chatId = '', selfId = '', senderId = '' } = {}, c) {
   const isGroup = String(kind) === 'group';
@@ -365,9 +464,15 @@ function platformFor({ kind = 'group', chatId = '', selfId = '', senderId = '' }
 }
 
 /**
- * 多选会话键：**钩子与工具必须用同一个函数拼**。
- * 这两处本来就该一致，各写一份的结果是"序号回复认不上"——
- * 一个传的是 platformIdOverride，另一个传的是解析后的 platformId（自检抓到过）。
+ * 构造多选会话键：`<chatKey>#<platformId>`。
+ *
+ * @param {{chatKey?: string, kind?: string, chatId?: string, senderId?: string, platformId?: string}} ctxFields
+ * @param {object} c 归一化配置。
+ * @returns {string} 会话键。
+ *
+ * @remarks **钩子与工具必须调用同一个函数**。两处各写一份会导致"序号回复认不上"——
+ * 一处用 `platformIdOverride`、另一处用解析后的 `platformId`，在配置了覆盖时必然错位
+ * （该问题由自检捕获过）。
  */
 function sessionKeyOf({ chatKey = '', kind = 'group', chatId = '', senderId = '', platformId = '' }, c) {
   const key = String(chatKey || '').trim()
@@ -377,9 +482,14 @@ function sessionKeyOf({ chatKey = '', kind = 'group', chatId = '', senderId = ''
 }
 
 /**
- * 记一位触发者（chatKey → senderId），容量有限，最旧的淘汰。
- * 存的是"最近一次 wws 是谁发的"，所以多人连续查询时后一次会覆盖前一次 ——
- * 这正是我们要的：模型调工具补查时，查的是**刚发指令的那个人**。
+ * 记录"最近一次 wws 是谁发起的"（`chatKey → senderId`），超出 50 条淘汰最旧。
+ *
+ * @param {string} chatKey 会话键。
+ * @param {string} senderId 触发者 QQ 号。
+ * @returns {void}
+ *
+ * @remarks 存的是**最近一次**，多人连续查询时后者覆盖前者 —— 这正是期望行为：
+ * 模型补查时应当查"刚发指令的那个人"。见模块级 `triggerSender` 的说明。
  */
 function rememberSender(chatKey, senderId) {
   const id = String(senderId || '').trim();
@@ -393,8 +503,20 @@ function rememberSender(chatKey, senderId) {
 }
 
 /**
- * 执行一次查询：调桥接 → 出图 → （按配置）发图 → 组装给模型看的文本。
- * `source` 只影响日志与文本措辞（钩子预取 vs 模型主动调工具）。
+ * 执行一次完整查询：调桥接 → 存图 → （按配置）自动发图 → 组装给模型看的文本。
+ *
+ * @param {object} params
+ * @param {object} params.ctx 运行上下文；必须含 `sender`（用于发图）。
+ * @param {string} params.command 指令正文（不含 `wws`）。
+ * @param {string} [params.platformIdOverride] 本次强制指定的查询目标。
+ * @param {number|null} [params.selectIndex] 续查序号（1~30）。
+ * @param {string} [params.source] 调用来源，仅用于日志与措辞（`'tool'` / `'hook'`）。
+ * @returns {Promise<{ok: boolean, text: string, status?: string, result?: object}>}
+ *   `text` 是给**模型**的资料；`ok=false` 时调用方应标记为错误结果。
+ * @side effect 命中 `status=wait` 时挂起多选会话；成功且开启自动发图时**会真的发消息**。
+ *
+ * @remarks 失败一律返回 `ok:false` 而不是抛错 —— 文本里已经写明原因与下一步，
+ * 交给模型转述比让异常冒泡更有用。
  */
 async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex = null, source = 'tool' }) {
   const c = cfg();
@@ -530,9 +652,23 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
 }
 
 /**
- * 把渲染图交给发送队列。
- * 三级通道：本地路径（协议端读盘，body 最小） → 本地图片服务 URL → base64 内联。
- * 这不是"绕过 sender"：三条都只是给它一个图片来源，队列/限频/去重/留档一个都不少。
+ * 把渲染图交给发送队列，按可靠性依次尝试三种图片来源。
+ *
+ * @param {object} ctx 运行上下文，需 `sender.sendImage` 与 `chatKey`。
+ * @param {{file?: string, url?: string, dataUrl: string}} image 已暂存的图片记录。
+ * @param {{note?: string, replyToMessageId?: (number|string|null), atUserId?: (number|string|null)}} [options]
+ * @returns {Promise<{ok: boolean, via?: string, messageId?: any, error?: string, skipped?: boolean}>}
+ *
+ * @remarks
+ * 三条通道**都只是给发送队列一个图片来源**，队列 / 限频 / 去重 / 留档一个都不少，
+ * 全程不触碰 `onebot.send*`：
+ *
+ * 1. `file` —— 协议端直接读本地磁盘，HTTP body 从数 MB 降到几百字节（首选）；
+ * 2. `url`  —— 本地只读图片服务，适用于协议端无法读取该路径的情况；
+ * 3. `dataUrl` —— base64 内联，最后的兜底。
+ *
+ * 前三者任一成功即返回。被发送队列按去重拦下时返回 `skipped:true` 而非报错 ——
+ * "这张图刚发过"是保护机制生效，不是故障。
  */
 async function sendImageNow(ctx, image, { note = null, replyToMessageId = null, atUserId = null } = {}) {
   if (!image) return { ok: false, error: '没有图片' };
@@ -549,6 +685,7 @@ async function sendImageNow(ctx, image, { note = null, replyToMessageId = null, 
         replyToMessageId: replyToMessageId ?? null,
         atUserId: atUserId ?? null
       });
+      // 会话留档：失败不影响"已发出"这一事实，故单独 try 包裹
       try {
         ctx.session?.sent?.push({
           type: 'image',
@@ -556,21 +693,30 @@ async function sendImageNow(ctx, image, { note = null, replyToMessageId = null, 
           at: new Date().toLocaleTimeString('zh-CN', { hour12: false })
         });
         if (ctx.session?.id) ctx.emit?.('session-update', ctx.session.id);
-      } catch { /* 留档失败不影响"已发出"这个事实 */ }
+      } catch { /* 留档失败不影响发送结果 */ }
       return { ok: true, via: attempt.name, messageId: r?.message_id ?? null };
     } catch (error) {
       lastError = String(error?.message ?? error);
-      // "刚刚发过"是去重拦下的，属于正常保护，不算失败
       if (/刚刚发过|已跳过/.test(lastError)) return { ok: false, error: '这张图刚刚发过（已按去重跳过）', skipped: true };
     }
   }
   return { ok: false, error: lastError || '未知错误' };
 }
 
+/**
+ * 挂起一个等待用户选择的多选会话（`sessionKey → options`）。
+ *
+ * @param {string} sessionKey 会话键，见 `sessionKeyOf`。
+ * @param {Array} options 归一化后的待选项（桥接已裁剪为最多 12 条）。
+ * @param {number} maxPending 会话数上限（配置项，默认 6）。
+ * @returns {void}
+ *
+ * @remarks TTL 固定 5 分钟：用户回序号通常只隔几十秒，再长也没有意义。
+ * ⚠️ 单位是**毫秒** —— 此处曾误写成 `5 * 60 * 1000 * 1000`（等于永不过期），
+ * 造成选项长期滞留，修改时请勿再加错数量级。
+ */
 function rememberPending(sessionKey, options, maxPending) {
   pending.set(sessionKey, { at: Date.now(), options });
-  // 容量与 TTL 双限：序号回复通常几十秒内到来，5 分钟足够，过期即弃。
-  // ttl 单位是毫秒（曾经这里写成 `5 * 60 * 1000 * 1000`，等于永不过期，别再加错）。
   const ttl = 5 * 60 * 1000;
   const now = Date.now();
   for (const [key, item] of pending) {
@@ -584,20 +730,39 @@ function rememberPending(sessionKey, options, maxPending) {
   }
 }
 
-// ── 钩子：确定性认领 + 预取 ─────────────────────────────────────────────────
+// ── 钩子 ──────────────────────────────────────────────────────────────────────
 
 export const hooks = {
   /**
-   * 组装提示词之前：认出 wws 指令、把真实数据塞进这一批上下文。
+   * `before-context`：在提示词组装之前完成**确定性认领**，并把结果追加到本批消息上。
    *
-   * ⚠️ 这里**故意**在钩子里做了一次网络请求，是权衡后的选择，边界必须守住：
-   *   项目文档（plugin-development.md §3.2）规定钩子 5 秒超时、不应做网络请求。
-   *   而"群里 @wws 就一定该出数据"——只做识别、把查询留给模型，模型很可能不调工具。
-   *   所以这里限时预取（hookPrefetchTimeoutMs，默认 3.6s，配置上限 4.5s），
-   *   并用 AbortController 真正掐断，保证**永远撞不到**那 5 秒；超时就退化成
-   *   "请模型用 wows-query 重查"（工具路径没有 5 秒限制）。
-   *   钩子本身不发消息、不重试 —— 发图交给完整发送管道。
-   *   不接受这个折中就把 hookPrefetch 关掉，那时钩子只剩纯文本判定（零网络）。
+   * 两遍扫描，职责互不重叠：
+   *
+   * 1. 第一遍 —— 认领 wws 指令。命中后记录触发者与消息 id；默认只注入一条
+   *    「【wws 指令已认领】」块，告诉模型调哪个工具、参数是什么。
+   *    若开启 `hookPrefetch`，则在此限时预取数据并直接注入结果。
+   * 2. 第二遍 —— 认领序号回复。用户对上一轮的多选提示回数字时，代其续查并注入结果。
+   *
+   * @param {object} ctx 钩子上下文
+   * @param {Array<object>} ctx.triggerEntries 本批触发消息（**可原地修改 `text`**）。
+   * @param {string} ctx.chatKey 会话键，如 `group:123`。
+   * @param {string} ctx.kind `'group'` / `'private'`。
+   * @param {string} ctx.chatId 群号或 QQ 号。
+   * @param {string} [ctx.selfId] 机器人 QQ 号（缺失时走身份推断）。
+   * @param {string} [ctx.selfNickname] 机器人在本群的昵称。
+   * @param {string} [ctx.botName] 人设里配置的机器人名字。
+   * @param {object} [ctx.onebot] OneBot 客户端（用于补问 `get_login_info`）。
+   * @returns {Promise<void>} 只通过修改 `triggerEntries[].text` 生效（钩子不该发消息）。
+   *
+   * @remarks
+   * **这是有意的"宁可不触发"设计**：触发词必须在最前、且必须 @ 到机器人本人。
+   * 群里聊到 wws 三个字母是常态，抢话比漏答更糟；判定失败时只在 `debug` 日志里
+   * 留一行原因，绝不猜。
+   *
+   * 关于"钩子里做网络请求"：默认路径**不发任何请求**（纯文本判定，微秒级）。
+   * 仅当用户显式打开 `hookPrefetch` 时才限时预取（默认 3.6s、上限 4.5s，
+   * 用 AbortController 真掐断，保证撞不到 5 秒硬超时）。实测一次查询需 5~13 秒，
+   * 因此该选项默认关闭 —— 依据见 README §2.3 与 §8。
    */
   'before-context': async ({ triggerEntries, chatKey, kind, chatId, selfId, selfNickname, botName, onebot } = {}) => {
     if (!Array.isArray(triggerEntries) || !triggerEntries.length) return;
@@ -693,7 +858,7 @@ export const hooks = {
         // 默认路径：钩子只做"确定性认领"，真正的查询交给 wows-query 工具。
         // 为什么不在钩子里查：一次查询要经过 yuyuko API + 浏览器渲染 + 截图，
         // 实测热态 5~13 秒（首次还要下载 chromium 与船图缓存，约 150 秒），
-        // 而钩子硬超时只有 5 秒 —— 预取必然超时，只会让每次 @wws 白等几秒。见 README §1。
+        // 而钩子硬超时只有 5 秒 —— 预取必然超时，只会让每次 @wws 白等几秒（见 README §8）。
         // 这里必须把"谁在问、问的什么"写清楚 —— 工具执行时的 ctx 里没有触发者 QQ 号。
         const cmd = hit.command || '帮助';
         note = '【wws 指令已认领】\n'

@@ -1,61 +1,101 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-wows-helper · Hikari-core-v2 桥接服务
-=====================================
+"""wows-helper · Hikari-core-v2 桥接服务。
 
-把 Python 侧的 Hikari-core-v2（指令解析 + yuyuko API 查询 + 浏览器端模板渲染出图）
-包成一个只在本机监听的 JSON HTTP 服务，供 QQ Agent 的 wows-helper 插件调用。
+把 Python 侧的 Hikari-core-v2（指令解析 → yuyuko API 查询 → 浏览器端模板渲染出图）
+包装成一个仅监听本机的 JSON HTTP 服务，供 QQ Agent 的 wows-helper 插件调用。
 
-为什么必须存在这一层
---------------------
-Hikari-core-v2 是 Python SDK：
-  · `init_hikari(platform, PlatformId, BotId, command_text, GroupId)` 解析 wws 指令
-  · 模板由**浏览器端 Nunjucks** 渲染，Python 只负责组装外壳 HTML 并用 playwright 截图
-Node 侧既跑不了这个 SDK，也没有可用的等价渲染链路，所以最干净的接法是"薄客户端 + 本地常驻桥接"。
-
-接口（只有两个，刻意不做更多）
-------------------------------
-  GET  /health         → {"ok":true,"ready":bool,"version":...,"pending":n}
-  POST /query          → 查询/续查一次
-
-POST /query 请求体：
-  {
-    "command": "ship 大和 recent 30",   // 不带 wws 前缀；续查时可为空
-    "platform": "QQ",                   // QQ / QQ_CHANNEL / QQ_OFFICIAL
-    "platform_id": "1000000001",        // 触发者；wws 的绑定按它存
-    "bot_id": "0",
-    "group_id": null,
-    "select_index": null,               // 续查：用户回复的序号（1 起）
-    "session_key": null,                // 续查：上一轮的会话键
-    "config": { "image_type": "jpeg", "use_browser": "chromium", ... }   // 可选覆盖
-  }
-
-POST /query 响应体：
-  {
-    "ok": true,
-    "status": "success" | "wait" | "failed" | "error",
-    "text": "文本结果或提示文案",
-    "data_type": "bytes" | "str" | ...,
-    "image_base64": "...",              // 有图时才有
-    "image_mime": "image/jpeg",
-    "options": [{"name": "..."}],       // status=wait 时的待选项
-    "elapsed_ms": 1234,
-    "command": "..."
-  }
-
-启动
-----
-  pip install -r bridge/requirements.txt
-  python -m playwright install chromium          # 首次：下载渲染用浏览器
-  python bridge/hikari_bridge.py --token "账号ID:Token"
-
-QQ Agent 侧的「桥接服务地址 / 口令」要与 --host/--port/--token 保持一致。
-
-安全说明
+设计动因
 --------
-默认只监听 127.0.0.1，并可用 --token 加一道口令（插件侧对应「桥接服务口令」配置项）。
-不要把它暴露到公网：它是**无鉴权的转发器**，拿到地址的人可以用你的 yuyuko 配额查数据。
+Hikari-core-v2 是 Python SDK，且**渲染链路完全在浏览器里**：
+
+* ``init_hikari(platform, PlatformId, BotId, command_text, GroupId, Ignore_List)``
+  负责指令解析与数据获取；
+* 模板由浏览器端 Nunjucks 渲染 —— Python 只组装外壳 HTML，再用 playwright 截图。
+
+Node 侧既无法运行该 SDK，也没有等价的渲染能力，因此采用
+「Node 薄客户端 + 本地常驻 Python 桥接」：Node 只负责 QQ 收发与确定性触发，
+Python 只负责 wws 的解析与出图，两侧通过本模块的 JSON 接口通信。
+
+对外接口
+--------
+仅两个端点，刻意不做更多（端点越少，鉴权与超时边界越清晰）：
+
+``GET /health``
+    探活与自检。响应字段：
+
+    ====================  =======  ==================================================
+    字段                  类型     说明
+    ====================  =======  ==================================================
+    ``ok``               bool    服务进程存活（恒为 true）
+    ``ready``            bool    依赖是否就绪（hikari-core 可导入）；false 时看 core_error
+    ``core_error``       str     导入失败原因，成功时为 null
+    ``version``          str     hikari-core 版本号
+    ``pending``          int     当前挂起的多选会话数
+    ``token_configured`` bool    是否已持有可用凭据（启动参数或已下发过）
+    ``token_source``     str     ``bridge-arg`` / ``plugin`` / ``none``
+    ``ignored_functions`` list   ``--ignore-list`` 实际生效的函数名（空列表 = 未禁用任何功能）
+    ====================  =======  ==================================================
+
+``POST /query``
+    执行一次查询或续查。请求体：
+
+    .. code-block:: json
+
+        {
+          "command": "ship 大和 recent 30",  // wws 指令正文，**不含 wws 前缀**；续查时可为空
+          "platform": "QQ",                  // QQ / QQ_CHANNEL / QQ_OFFICIAL
+          "platform_id": "1000000001",       // 触发者 ID；wws 的账号绑定按此查询
+          "bot_id": "0",
+          "group_id": null,                  // 群聊传群号，私聊传 null
+          "select_index": null,              // 续查：用户回复的序号（1 起）
+          "session_key": null,               // 续查：上一轮的会话键
+          "config": {                        // 可选，覆盖本次查询的运行时配置
+            "image_type": "jpeg",
+            "use_browser": "chromium",
+            "hikari_token": "账号ID:Token"    // 插件设置页填的凭据，优先级最高
+          }
+        }
+
+    响应体：
+
+    .. code-block:: json
+
+        {
+          "ok": true,                        // status 为 success/wait 时为 true
+          "status": "success",               // success | wait | failed | error
+          "text": "文本结果或服务端提示",
+          "data_type": "jpeg",               // 出图格式，或 str(type(Data))
+          "image_base64": "...",             // 有图时才有
+          "image_mime": "image/jpeg",
+          "options": [{"name": "..."}],      // status=wait 时的待选项
+          "elapsed_ms": 1234,
+          "command": "ship 大和",
+          "token_source": "plugin"           // 本次实际使用的凭据来源
+        }
+
+    HTTP 状态码语义：``400`` 请求体不合法（缺 platform_id / command），
+    ``401`` 访问口令不匹配，``404`` 路径不存在，``500`` 未预期的内部异常。
+    **业务失败一律走 200**，由 ``ok`` / ``status`` 表达 —— 这样调用方只需要
+    解析一种成功结构，不必为每种业务失败分别写分支。
+
+凭据解析优先级
+--------------
+1. 请求 ``config.hikari_token``（用户在 QQ Agent 设置页填写，随查询下发）；
+2. 启动参数 ``--token`` / 环境变量 ``HIKARI_TOKEN``。
+
+两处都没有时，``/query`` 会返回一条人类可读的指引，而不是让上游抛出"未授权"。
+
+安全边界
+--------
+默认仅监听 ``127.0.0.1``；``--access-token`` 可再加一道口令（对应插件侧「桥接服务口令」）。
+**不要暴露到公网**：本服务是无状态转发器，持有地址者即可消耗你的 yuyuko 配额。
+
+典型启动方式::
+
+    python bridge/hikari_bridge.py --token "账号ID:Token"
+    python bridge/hikari_bridge.py                     # 凭据稍后在插件设置页填
+    python bridge/hikari_bridge.py --help              # 全部参数
 """
 from __future__ import annotations
 
@@ -74,6 +114,14 @@ ENV_TOKEN_KEYS = ("HIKARI_TOKEN", "WOWS_HELPER_TOKEN")
 
 
 def parse_args(argv=None):
+    """解析命令行参数（每项都有同名环境变量作为默认值，便于写进启动脚本）。
+
+    参数解析刻意放在 **导入 hikari_core 之前**：后者的模块级代码会打印模板目录日志，
+    先定好日志级别与格式，启动输出才干净。
+
+    :param argv: 参数列表；``None`` 表示取 ``sys.argv[1:]``（便于测试注入）。
+    :returns: ``argparse.Namespace``。
+    """
     p = argparse.ArgumentParser(description="wows-helper 的 Hikari-core-v2 桥接服务")
     p.add_argument("--host", default=os.environ.get("WOWS_HELPER_BRIDGE_HOST", "127.0.0.1"),
                    help="监听地址，默认 127.0.0.1（仅本机）")
@@ -106,19 +154,23 @@ def parse_args(argv=None):
 ARGS = parse_args()
 
 
-# ── 依赖加载：失败时不要崩掉，留在 /health 里报告，便于插件把原因说清楚 ────────────────
+# ── 依赖加载 ─────────────────────────────────────────────────────────────────
+# 策略：导入失败**不让进程退出**，而是记录下来由 /health 的 ready/core_error 暴露。
+# 理由：桥接常驻运行，用户装依赖往往是在它启动之后；直接崩掉只会得到一个
+# "端口没人监听"的现象，排查成本远高于一句明确的报错。
 try:
     from loguru import logger
 
     logger.remove()
     logger.add(sys.stdout, level=ARGS.log_level,
                format="<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | {message}")
-except Exception:  # pragma: no cover - loguru 一定会随 hikari-core 装上
+except Exception:  # pragma: no cover - loguru 随 hikari-core 一起安装，正常不会走到
     import logging
 
     logging.basicConfig(level=getattr(logging, ARGS.log_level, logging.INFO))
     logger = logging.getLogger("wows-bridge")
 
+# 这些名字在依赖缺失时保持 None，由 call_hikari() 统一拦截并给出可照做的提示
 CORE_ERROR = None
 Hikari_Model = None
 callback_hikari = None
@@ -140,10 +192,11 @@ try:
     init_hikari = _init_hikari
     set_hikari_config = _set_hikari_config
     CORE_VERSION = str(_core_version)
-except Exception as exc:  # pragma: no cover - 部署期才会走到
+except Exception as exc:  # pragma: no cover - 仅部署期会走到
     CORE_ERROR = f"{type(exc).__name__}: {exc}"
     logger.error(f"无法导入 hikari_core：{CORE_ERROR}")
-    logger.error("请先执行：pip install -r bridge/requirements.txt 且 python -m playwright install chromium")
+    logger.error("安装方式：pip install --target .hikari-deps <Hikari-core-v2 源码目录>，"
+                 "再执行 python -m playwright install chromium（或直接运行 start-bridge.ps1）")
 
 
 CONFIGURED = False
@@ -159,15 +212,19 @@ ACTIVE_IGNORE: list = []
 
 
 def resolve_ignore_list(names) -> list:
-    """
-    把 `--ignore-list set_BindInfo,get_BindInfo` 这样的名字解析成**函数对象**列表。
+    """把 ``--ignore-list`` 的名字列表解析成**函数对象**列表。
 
-    为什么必须是函数对象：`init_hikari` 内部是 `if hikari.Function in Ignore_List`，
-    比的是函数本身。实测传字符串 `['get_BindInfo']` **完全无效**（查询照常成功），
-    只有 `[get_BindInfo]`（真函数）才会返回"该功能已被禁用"。
+    上游 ``init_hikari`` 内部做的是 ``if hikari.Function in Ignore_List`` ——
+    比较的是函数对象本身。实测传字符串 ``['get_BindInfo']`` **完全无效**
+    （查询照常成功），只有 ``[get_BindInfo]`` 才会返回"该功能已被禁用"。
+    这个差异没有任何报错可循，因此本函数会：
 
-    名字从 hikari_core 顶层命名空间取（它的 __init__ 显式再导出了这些函数）。
-    解析不到的会明确告警 —— 静默失败在这里后果是"以为禁用了其实没禁"。
+    * 从 ``hikari_core`` 顶层命名空间解析名字（其 ``__init__`` 显式再导出了这些函数）；
+    * 对解析不到的名字**明确告警** —— 静默失败在此处的后果是"以为禁用了其实没禁"；
+    * 去重并保持输入顺序。
+
+    :param names: 函数名字符串序列，例如 ``['set_BindInfo', 'delete_BindInfo']``。
+    :returns: 解析成功的函数对象列表；依赖缺失或无输入时返回空列表。
     """
     if init_hikari is None or not names:
         return []
@@ -193,14 +250,24 @@ def resolve_ignore_list(names) -> list:
 
 
 def resolve_token(overrides: dict | None = None) -> tuple[str, str]:
-    """
-    决定这次查询用哪个 yuyuko 凭据，并返回 (凭据, 来源)。优先级：
+    """决定本次查询使用的 yuyuko 凭据，并返回 ``(凭据, 来源)``。
 
-      1. 插件请求里带的 `hikari_token`（用户在 QQ Agent 设置页填的）→ 'plugin'
-         —— 让"不会敲命令行"的用户也能配好，这是主要通路；
-      2. 启动参数 --token / 环境变量 HIKARI_TOKEN → 'bridge-arg'（无人值守部署时用）。
+    优先级（顺序即设计意图）：
 
-    两处都没配时返回 ('', '')，由调用方决定怎么报错。
+    1. ``overrides['hikari_token']`` → ``'plugin'``
+       用户在 QQ Agent 设置页填写、随每次查询下发。这是**主通路**：
+       它让不敲命令行、不配环境变量的用户也能把插件配好。
+    2. 启动参数 ``--token`` / 环境变量 ``HIKARI_TOKEN`` → ``'bridge-arg'``
+       面向无人值守部署。
+
+    :param overrides: ``/query`` 请求里的 ``config`` 字典，可为 ``None``。
+    :returns: ``(token, source)``；两处都没有凭据时返回 ``('', '')``，
+        由调用方（``call_hikari``）负责给出可照做的提示。
+
+    .. note::
+       返回值必须是**元组**而非单纯的 token 字符串：调用方需要把"来源"原样回给插件，
+       以便界面能显示"当前凭据来自哪"。注意不要写成 ``if not resolve_token(...)`` ——
+       元组恒为真，必须取 ``[0]`` 判断（这个坑在重构时踩过一次）。
     """
     token = str((overrides or {}).get("hikari_token") or "").strip()
     if token:
@@ -212,9 +279,22 @@ def resolve_token(overrides: dict | None = None) -> tuple[str, str]:
 
 
 def apply_config(overrides: dict | None = None) -> None:
-    """
-    把配置交给 Hikari-core。**每次查询前都会调用**（幂等、开销极小），
-    这样插件改了"出图方式/浏览器/代理/凭据"等设置后不用重启桥接服务即刻生效。
+    """把运行时配置交给 Hikari-core。
+
+    **每次查询前都会调用**（幂等，开销可忽略），因此插件侧改了出图格式、浏览器、
+    代理或凭据之后，无需重启桥接服务，下一次查询即生效。
+
+    实现上有三处必须保留的自保逻辑：
+
+    1. 空值不覆盖：``None`` / ``""`` 一律视为"本次不改这一项"，回落到启动参数的值；
+    2. 参数名同义映射：上游把浏览器参数拼成了 ``use_broswer``（少一个 w），
+       直接用正确的 ``use_browser`` 会被签名过滤**静默丢弃**，
+       表现为"设置里选了 firefox 却一直用 chromium"；
+    3. 未知键过滤：按 ``set_hikari_config`` 的真实签名裁剪，避免上游改签名后抛 TypeError。
+
+    :param overrides: ``/query`` 请求里的 ``config`` 字典。
+    :side effect: 更新模块级 ``ACTIVE_TOKEN`` / ``ACTIVE_TOKEN_SOURCE``，
+        并（首次调用时）打印一条配置摘要。
     """
     global CONFIGURED, ACTIVE_TOKEN, ACTIVE_TOKEN_SOURCE
     if set_hikari_config is None:
@@ -258,7 +338,14 @@ def apply_config(overrides: dict | None = None) -> None:
 
 
 def _tri(value):
-    """三态布尔：None=不覆盖，其余转成真布尔。"""
+    """三态布尔转换：``None`` 表示"本次不覆盖这一项"，其余按字符串语义转成真布尔。
+
+    之所以需要三态而不是普通 bool：``apply_config`` 要把"调用方没给这个设置"
+    与"调用方明确要求关闭"区分开 —— 前者应回落到启动参数/默认值，后者必须真的生效。
+
+    :param value: ``None`` / ``bool`` / 字符串（``"0"``、``"false"``、``"no"``、``"off"``、``""`` 均视为假）。
+    :returns: ``None`` 或 ``bool``。
+    """
     if value is None:
         return None
     if isinstance(value, bool):
@@ -266,11 +353,21 @@ def _tri(value):
     return str(value).strip().lower() not in ("0", "false", "no", "off", "")
 
 
-# ── 多选（wait）会话：用户回复序号后续查 ────────────────────────────────────────────
+# ── 多选（wait）会话 ──────────────────────────────────────────────────────────
+# 上游在"重名舰船 / 多绑定"这类场景会返回 status=wait，要求调用方带一个序号回调。
+# 回调需要**原始 Hikari_Model 对象**（里面保存着解析结果与候选列表），因此这里
+# 按会话键挂起对象。生命周期由 TTL + 条数上限双重约束，避免常驻进程内存增长。
 PENDING: dict[str, dict] = {}
 
 
 def pending_put(key: str, hikari) -> None:
+    """挂起一个待用户选择的会话，并顺带做 TTL 清理与容量裁剪。
+
+    :param key: 会话键（插件侧构造为 ``<chatKey>#<platformId>``）。
+    :param hikari: 处于 ``wait`` 状态的 ``Hikari_Model``。
+    :side effect: 就地增删 ``PENDING``。清理策略为"先按 TTL 过期，再按最旧淘汰"，
+        两步都是 O(n) 且 n 很小（默认上限 32）。
+    """
     now = time.time()
     for k in [k for k, v in PENDING.items() if now - v["at"] > ARGS.pending_ttl]:
         PENDING.pop(k, None)
@@ -281,7 +378,16 @@ def pending_put(key: str, hikari) -> None:
 
 
 def extract_options(data) -> list:
-    """把 Hikari 的 Select_Data 归一化成 [{"name": ...}, ...]，失败就返回空列表。"""
+    """把 Hikari 的 ``Input.Select_Data`` 归一化为 ``[{"name": str}, ...]``。
+
+    上游的待选项结构随指令而异（可能是 dict 也可能是裸字符串，键名有
+    ``name`` / ``Name`` / ``text`` / ``shipName`` 等多种写法），这里统一成
+    插件侧唯一认得的形状，并在 80 字符处截断、最多保留 12 条 —— 待选项是
+    给人在群里看的，过长会刷屏。
+
+    :param data: ``Select_Data``，期望为 list/tuple；其它类型一律视为"没有选项"。
+    :returns: 归一化后的列表；解析失败返回 ``[]``（插件侧据此退化为提示文案）。
+    """
     out = []
     if not isinstance(data, (list, tuple)):
         return out
@@ -289,7 +395,7 @@ def extract_options(data) -> list:
         if isinstance(item, dict):
             name = item.get("name") or item.get("Name") or item.get("text") or item.get("shipName")
             if name is None:
-                # 兜底：取第一个字符串值
+                # 兜底：取第一个非空字符串值（上游字段名不固定时仍能给用户看的东西）
                 for v in item.values():
                     if isinstance(v, str) and v.strip():
                         name = v
@@ -301,17 +407,32 @@ def extract_options(data) -> list:
 
 
 def package(hikari, command: str, elapsed_ms: int, session_key: str | None = None) -> dict:
-    """把 Hikari_Model 转成本服务的响应体。"""
+    """把 ``Hikari_Model`` 转换成本服务的响应体（见模块 docstring 的字段表）。
+
+    三类 ``Output.Data`` 分别处理：
+
+    * ``bytes``/``bytearray`` → base64 放进 ``image_base64``，并按魔数/类型猜 mime；
+    * ``str`` → 原样放进 ``text``（Hikari 的失败提示、帮助页纯文本走这条）；
+    * 其它（dict/list）→ 序列化成 JSON 文本，便于关闭 ``auto_image`` 时排查。
+
+    :param hikari: ``Hikari_Model`` 实例。
+    :param command: 本次指令正文（用于回显与日志）。
+    :param elapsed_ms: 本次查询耗时，毫秒。
+    :param session_key: 多选会话键；``status == 'wait'`` 时用它把 hikari 对象挂起。
+    :returns: 可直接 JSON 序列化的响应字典。
+    :side effect: 当 ``status == 'wait'`` 且给了 ``session_key`` 时，把 hikari 对象
+        存入 ``PENDING``（供用户回复序号后 ``callback_hikari`` 续查）。
+    """
     status = str(getattr(hikari, "Status", "error") or "error")
     out = getattr(hikari, "Output", None)
     data = getattr(out, "Data", None)
-    # Data_Type 可能是 str(type(x)) 这种类描述，不是 mime：只在 shape 靠谱时才用
+    # Data_Type 可能是 str(type(x)) 这类类描述而非 mime，因此下面只在该形状可信时才用
     raw_type = getattr(out, "Data_Type", "") or ""
     data_type = raw_type if isinstance(raw_type, str) else str(raw_type)
     resp = {
         "ok": status in ("success", "wait"),
         "status": status,
-        # command 可能不是 str（模型/上游给过非字符串），统一成 JSON 可序列化的形式
+        # command 未必是 str（上游/调用方给过非字符串），统一成可 JSON 序列化的形式
         "command": command if isinstance(command, str) else str(command),
         "text": "",
         "data_type": data_type,
@@ -332,8 +453,9 @@ def package(hikari, command: str, elapsed_ms: int, session_key: str | None = Non
         try:
             resp["image_base64"] = base64.b64encode(bytes(data)).decode("ascii")
             resp["image_mime"] = mime
-        except Exception as exc:  # pragma: no cover - 内存/编码异常
-            # 宁可回一句人话，也不要把整个响应打成 500（前端拿到的是"桥接内部错误"）
+        except Exception as exc:  # pragma: no cover - 仅内存/编码异常
+            # 编码失败也不要把响应打成 500：调用方需要的是"一句话说明"，
+            # 而不是"桥接服务内部错误"这种无从下手的信息。
             logger.error(f"渲染图 base64 编码失败：{exc}")
             resp["ok"] = False
             resp["status"] = "error"
@@ -344,8 +466,8 @@ def package(hikari, command: str, elapsed_ms: int, session_key: str | None = Non
     elif data is None:
         resp["text"] = ""
     else:
-        # dict / list：没有渲染成图时（auto_image 关闭）给 JSON，方便排查。
-        # default=str 兜底：模型里可能混入 datetime 之类的不可序列化对象。
+        # dict / list：未渲染成图时（auto_image 关闭）转 JSON 便于排查。
+        # default=str 兜底：数据里可能混入 datetime 等不可序列化对象。
         try:
             resp["text"] = json.dumps(data, ensure_ascii=False, default=str)[:4000]
         except Exception:
@@ -363,13 +485,31 @@ def package(hikari, command: str, elapsed_ms: int, session_key: str | None = Non
 
 async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: str,
                       group_id, select_index, session_key, config_overrides) -> dict:
-    """真正的查询：续查走 callback_hikari，新查询走 init_hikari。"""
+    """执行一次查询或续查，返回已打包好的响应体。
+
+    两条路径由入参决定：
+
+    * ``select_index`` 有值且 ``PENDING`` 里存在对应会话 → 续查
+      （把序号写回挂起的 ``Hikari_Model``，再走 ``callback_hikari``）；
+    * 否则 → 新查询（``init_hikari``）。
+
+    :param command: 指令正文（不含 ``wws`` 前缀）。续查时可为空。
+    :param platform: ``QQ`` / ``QQ_CHANNEL`` / ``QQ_OFFICIAL`` 等平台标识。
+    :param platform_id: 触发者 ID。wws 的账号绑定按此查询，传错人会查到别人的水表。
+    :param bot_id: 机器人自身标识（``init_hikari`` 的必填参数之一）。
+    :param group_id: 群号；``None``/``""`` 表示私聊。
+    :param select_index: 用户回复的序号（1 起）；``None`` 表示新查询。
+    :param session_key: 多选会话键；用于挂起与查找 ``PENDING``。
+    :param config_overrides: 请求里的 ``config``，逐项覆盖运行时配置。
+    :raises RuntimeError: 依赖未就绪，或两处都没有配置凭据（消息均为可照做的中文指引）。
+    :raises ValueError: 既没有挂起的会话，又没有给出指令。
+    """
     if init_hikari is None:
         raise RuntimeError(f"hikari-core 未就绪：{CORE_ERROR or '未安装'}")
-    # ⚠️ resolve_token 返回 (凭据, 来源) 元组 —— 元组恒为真，必须取第一个元素判断，
-    #    否则"没配凭据"这条分支永远不会触发（改成元组返回时踩到的坑）。
+    # ⚠️ resolve_token 返回 (凭据, 来源) 元组，元组恒为真值，必须取 [0] 判断 ——
+    #    直接写 `if not resolve_token(...)` 会让"没配凭据"这条分支永远不触发。
     if not resolve_token(config_overrides)[0]:
-        # 两处都没配：与其让 Hikari 回一句"未授权"，不如直接告诉用户去哪填
+        # 两处都没配：与其让上游回一句"未授权"，不如直接告诉用户去插件设置里填
         raise RuntimeError("没有配置 yuyuko API 凭据：请在 QQ Agent 的插件设置里填「yuyuko API 凭据」，"
                            "或用 --token/环境变量 HIKARI_TOKEN 启动桥接服务")
 
@@ -380,7 +520,6 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
     if pend is not None:
         hikari = pend["hikari"]
         hikari.Input.Select_Index = int(select_index)
-        # 续查时把平台信息补齐（同一会话内用户与群不会变，但平台标识可能被插件改过）
         hikari = await callback_hikari(hikari)
         PENDING.pop(session_key, None)
         elapsed = int((time.time() - started) * 1000)
@@ -390,8 +529,8 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
     if not str(command or "").strip():
         raise ValueError("续查失败：没有挂起的会话，且没有给出指令")
 
-    # 同一个会话又发起了新查询：把上一次挂起的多选会话丢掉（否则它会一直占着内存，
-    # 而且用户之后回一个序号会被拿去接一个早就过期的上下文）
+    # 同一会话又发起新查询：丢弃上一次挂起的多选会话。
+    # 否则它会一直占着内存，且用户随后回一个序号会被接到早已过期的上下文上。
     if session_key:
         PENDING.pop(session_key, None)
 
@@ -401,7 +540,7 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
         BotId=str(bot_id),
         command_text=str(command),
         GroupId=(str(group_id) if group_id not in (None, "") else None),
-        # 禁用清单（可选）。注意：必须传**函数对象**，传字符串无效 —— 见 resolve_ignore_list
+        # 禁用清单（可选）。必须传**函数对象**，传字符串无效 —— 见 resolve_ignore_list
         Ignore_List=ACTIVE_IGNORE or None,
     )
     elapsed = int((time.time() - started) * 1000)
@@ -409,16 +548,28 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
     return package(hikari, command, elapsed, session_key)
 
 
-# ── HTTP 服务（标准库，无额外依赖）────────────────────────────────────────────────
+# ── HTTP 服务（标准库 asyncio，不引入 Web 框架）────────────────────────────────────
 class Handler:
+    """极简 HTTP 处理器：一行请求头 + 可选 JSON 体，响应后立即关闭连接。
+
+    刻意用标准库而非 aiohttp/FastAPI：本服务只有一个常驻进程、两个端点，
+    额外的框架依赖会让 `start-bridge.ps1` 的安装步骤更脆弱（版本冲突、
+    需要编译等），而这里真正需要的能力只有"读一行请求、回一段 JSON"。
+    """
+
     def __init__(self):
         self.access_token = ARGS.access_token
 
-    # —— 路由 ——
+    # ── 入口与兜底 ──
     async def __call__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """asyncio 服务器回调：处理一个连接，并保证连接一定被关闭。
+
+        未预期的异常在这里被收敛成 500 + 一句说明，绝不让异常冒到事件循环
+        （那会打印一大段 traceback 并可能带走整个服务）。
+        """
         try:
             await self.handle(reader, writer)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:  # pragma: no cover - 仅未预期路径
             logger.error(f"请求处理异常：{exc}\n{traceback.format_exc()}")
             await self.respond(writer, HTTPStatus.INTERNAL_SERVER_ERROR,
                                {"ok": False, "error": "internal-error", "hint": str(exc)[:300]})
@@ -430,6 +581,12 @@ class Handler:
                 pass
 
     async def handle(self, reader, writer):
+        """解析请求行与请求头，按路径分发；未知路径返回 404。
+
+        认证在此处集中处理：配置了 ``--access-token`` 时，所有端点（含 ``/health``）
+        都要求 ``X-Hikari-Token`` 匹配。把口令检查放在路由**之前**是有意的 ——
+        避免日后新增端点时忘记加鉴权。
+        """
         head = await reader.readuntil(b"\r\n\r\n")
         lines = head.decode("latin-1").split("\r\n")
         method, path, _ = (lines[0].split(" ") + ["", "", ""])[:3]
@@ -452,16 +609,17 @@ class Handler:
         if method == "GET" and path_only in ("/health", "/"):
             await self.respond(writer, HTTPStatus.OK, {
                 "ok": True,
-                "ready": CORE_ERROR is None,          # 依赖就绪（凭据是每请求决定的，见 token_configured）
+                # ready 只表示依赖就绪；凭据是每请求决定的，另有 token_configured 字段
+                "ready": CORE_ERROR is None,
                 "version": CORE_VERSION,
                 "core_error": CORE_ERROR,
                 "pending": len(PENDING),
                 "image_type": ARGS.image_type,
                 "browser": ARGS.use_browser,
-                # 凭据状态供插件侧把提示写准：bridge-arg=启动参数里有；none=还没有（等插件设置里填）
+                # 凭据状态：让插件把提示写准（bridge-arg=启动参数里有；none=等插件设置里填）
                 "token_configured": bool(ACTIVE_TOKEN) or bool(str(ARGS.token or '').strip()),
                 "token_source": ACTIVE_TOKEN_SOURCE or 'none',
-                # 已禁用的功能（--ignore-list），方便确认"我禁的到底生效没有"
+                # 已生效的禁用清单：用于确认"我禁的到底生效没有"
                 "ignored_functions": [getattr(f, '__name__', str(f)) for f in ACTIVE_IGNORE],
             })
             return
@@ -473,6 +631,12 @@ class Handler:
         await self.respond(writer, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not-found", "hint": path_only})
 
     async def query(self, body: bytes, writer):
+        """处理 ``POST /query``：解析请求体 → 校验必填项 → 调 ``call_hikari`` → 回包。
+
+        业务失败（Hikari 返回 failed/error）走 **HTTP 200**，由响应体的
+        ``ok``/``status`` 表达；只有"请求本身不合法"（400）与"内部异常"（500）
+        才用非 2xx。这样调用方只需解析一种成功结构。
+        """
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
         except Exception as exc:
@@ -489,6 +653,8 @@ class Handler:
         session_key = payload.get("session_key")
         config_overrides = payload.get("config") or {}
 
+        # 校验只做"无法继续"的两项，其余交给 Hikari 自己判断（它更清楚各指令需要什么）：
+        # platform_id 缺失会让绑定查询指向错误的人；command 为空且非续查则无事可做。
         if not platform_id:
             await self.respond(writer, HTTPStatus.BAD_REQUEST,
                                {"ok": False, "error": "missing-platform-id",
@@ -506,6 +672,8 @@ class Handler:
                 config_overrides=config_overrides,
             )
         except Exception as exc:
+            # 统一转成 200 + status=error：异常文案（如"没有配置 yuyuko API 凭据…"）
+            # 是给最终用户看的，必须能被插件原样读出并展示。
             logger.error(f"查询失败：{exc}\n{traceback.format_exc()}")
             await self.respond(writer, HTTPStatus.OK, {
                 "ok": False, "status": "error", "command": command,
@@ -517,6 +685,11 @@ class Handler:
         await self.respond(writer, HTTPStatus.OK, result)
 
     async def respond(self, writer, status, obj):
+        """回一个 ``application/json; charset=utf-8`` 响应并关闭连接。
+
+        ``Connection: close`` 是有意的：本服务的客户端是单机插件，请求频率极低，
+        用短连接换掉 keep-alive 的状态管理更省心（也不必处理半关闭与超时）。
+        """
         raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         head = (
             f"HTTP/1.1 {int(status)} {HTTPStatus(int(status)).phrase}\r\n"
@@ -530,6 +703,14 @@ class Handler:
 
 
 async def amain() -> int:
+    """启动流程：解析禁用清单 → 尝试初始化配置 → 常驻监听。
+
+    **没有 ``--token`` 也照常启动**：凭据可以稍后在 QQ Agent 的设置页里填
+    （随每次查询下发，见 :func:`resolve_token`）。早期版本"缺凭据就退出"，
+    结果只用图形界面的用户根本没有机会填写 —— 这是一个必须避免的设计。
+
+    :returns: 进程退出码。``3`` 表示 hikari-core 配置失败（依赖装了一半等情况）。
+    """
     global ACTIVE_IGNORE
     has_cli_token = bool(ARGS.token) and ARGS.token != DEFAULT_TOKEN_PLACEHOLDER
     if CORE_ERROR:
@@ -537,14 +718,12 @@ async def amain() -> int:
                        f"查询会直接报错。装完依赖后重启本服务。")
     else:
         try:
+            # 中英文逗号都接受：用户从 README 复制时容易带全角
             ACTIVE_IGNORE = resolve_ignore_list(
                 [x for x in str(ARGS.ignore_list or '').replace('，', ',').split(',') if x.strip()]
             )
             if has_cli_token:
                 apply_config({})
-            # 没有 --token 也**照常启动**：凭据可以之后在 QQ Agent 的插件设置里填
-            # （请求里带 hikari_token，见 resolve_token）。启动就退出的设计对
-            # "只用图形界面"的用户太不友好 —— 他们根本没机会填。
         except Exception as exc:
             logger.error(f"初始化 hikari-core 配置失败：{exc}")
             return 3
@@ -552,6 +731,7 @@ async def amain() -> int:
     server = await asyncio.start_server(Handler(), host=ARGS.host, port=ARGS.port)
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets or [])
     logger.info(f"wows-helper 桥接服务已启动：http://{ARGS.host}:{ARGS.port} （{addrs}）")
+    # 启动横幅直接把"插件侧还要配什么"讲清楚：这是首次部署最常见的卡点
     logger.info("请在 QQ Agent 的『插件 → 战舰世界助手』设置里确认：")
     logger.info("   · 桥接服务地址 = http://127.0.0.1:%d" % ARGS.port)
     if has_cli_token:
