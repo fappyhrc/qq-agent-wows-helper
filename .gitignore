@@ -19,6 +19,12 @@ data/
 .install.log*
 .probe/
 .probe2/
+# 我自己的临时脚本/备份：脱敏、审计、提交信息等一次性文件，绝不入库
+.audit.py
+.scrub.py
+.upd-prompt.py
+.backup-scrub/
+.commit-msg.tmp
 bridge/__pycache__/
 __pycache__/
 *.pyc
