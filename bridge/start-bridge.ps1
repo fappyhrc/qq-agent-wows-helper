@@ -60,6 +60,26 @@ $troubleshoot = "1) python versions: py -0 ; 2) deps dir: $depsDir ; 3) full rei
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Warn2([string]$msg) { Write-Host "!!  $msg" -ForegroundColor Yellow }
 
+# Run a python snippet and report whether it succeeded, WITHOUT letting its stderr kill us.
+#
+# Why this helper exists: the script sets $ErrorActionPreference = 'Stop' (we want pip and
+# playwright failures to abort). But with that preference, PowerShell 5.1 promotes a native
+# command's *stderr output* to a terminating error -- and `import hikari_core` legitimately
+# prints a WARNING to stderr. The result was a silent exit right after the Python probe:
+# no bridge, no message. So every probe goes through here with the preference relaxed.
+function Invoke-PythonProbe([string]$snippet) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $out = & $py @pyArgs -c $snippet 2>&1
+    return @{ ok = ($LASTEXITCODE -eq 0); output = @($out) }
+  } catch {
+    return @{ ok = $false; output = @("$($_.Exception.Message)") }
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
 if (-not $Token) {
   # Not mandatory: the credential can also be supplied later from the QQ Agent plugin
   # settings (sent per request as hikari_token). Asking once here just saves a round trip.
@@ -147,14 +167,14 @@ if (-not $SkipInstall -or $ForceReinstall) {
   $depsOk = $false
   if ((-not $ForceReinstall) -and (Test-Path (Join-Path $depsDir 'hikari_core'))) {
     $env:PYTHONPATH = $depsDir
-    $probeOut = & $py @pyArgs -c "import hikari_core; print(hikari_core.__version__)" 2>&1
-    $depsOk = ($LASTEXITCODE -eq 0)
+    $probe = Invoke-PythonProbe "import hikari_core; print('hikari-core', hikari_core.__version__, 'import OK')"
+    $depsOk = $probe.ok
     if ($depsOk) {
-      $ver = $probeOut | Select-Object -Last 1
-      Write-Host "    hikari-core $ver already importable - skipping install"
+      Write-Host "    $($probe.output | Where-Object { $_ -match 'import OK' } | Select-Object -Last 1)"
+      Write-Host '    (dependencies already usable - skipping install)'
       if (-not (Test-Path $readyMarker)) { New-Item -ItemType File -Path $readyMarker -Force | Out-Null }
     } else {
-      Write-Warn2 "found .hikari-deps but import failed, reinstalling: $($probeOut | Select-Object -Last 1)"
+      Write-Warn2 "found .hikari-deps but the import failed, will reinstall. Last line: $($probe.output | Select-Object -Last 1)"
     }
   }
 
@@ -182,8 +202,8 @@ if (-not $SkipInstall -or $ForceReinstall) {
   # Final pre-flight: state clearly whether the bridge will actually work, rather than
   # letting the user discover it by trying in a group chat.
   $env:PYTHONPATH = $depsDir
-  $null = & $py @pyArgs -c "import hikari_core" 2>&1
-  if ($LASTEXITCODE -ne 0) {
+  $final = Invoke-PythonProbe 'import hikari_core'
+  if (-not $final.ok) {
     Write-Warn2 'hikari-core is still not importable - the bridge will start with ready=false and every query will fail.'
     Write-Warn2 "Troubleshoot: $troubleshoot"
   }
