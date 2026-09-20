@@ -101,6 +101,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -162,15 +163,37 @@ ARGS = parse_args()
 # 策略：导入失败**不让进程退出**，而是记录下来由 /health 的 ready/core_error 暴露。
 # 理由：桥接常驻运行，用户装依赖往往是在它启动之后；直接崩掉只会得到一个
 # "端口没人监听"的现象，排查成本远高于一句明确的报错。
+
+# 模板同步期间的 ERROR 抑制开关，配合 _error_suppressor 使用。
+# 必须定义在下面的 logger 初始化**之前**：初始化时要把它挂成 sink 的 filter。
+_suppress_errors = False
+
+
+def _error_suppressor(record) -> bool:
+    """loguru 过滤器：抑制窗口内丢掉 ERROR 级记录。
+
+    刻意只丢 ERROR：WARNING 及以下（如上游的"模板清单里有可疑的键"）保留，
+    它们不影响"瞬时故障还是确定性故障"的判断。
+    """
+    return not (_suppress_errors and record['level'].no >= 40)
+
+
 try:
     from loguru import logger
 
+    _IS_LOGURU = True
     logger.remove()
+    # 给唯一的输出 sink 挂上 ERROR 抑制器：模板同步那一段需要"先拦下、再决定是否重放"。
+    # ⚠️ 之所以挂在已有 sink 上而不是"临时再加一个 sink"：loguru 的 sink **不可重入**，
+    #    在 sink 里调 logger.remove() 会抛 RuntimeError（且原始 ERROR 照样会泄漏到别的 sink），
+    #    详见 _collect_loguru_messages。
     logger.add(sys.stdout, level=ARGS.log_level,
-               format="<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | {message}")
+               format="<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | {message}",
+               filter=_error_suppressor)
 except Exception:  # pragma: no cover - loguru 随 hikari-core 一起安装，正常不会走到
     import logging
 
+    _IS_LOGURU = False
     logging.basicConfig(level=getattr(logging, ARGS.log_level, logging.INFO))
     logger = logging.getLogger("wows-bridge")
 
@@ -180,7 +203,41 @@ Hikari_Model = None
 callback_hikari = None
 init_hikari = None
 set_hikari_config = None
+# 上游 set_hikari_config 的原始引用，供 guarded_set_hikari_config 转发（见该函数）
+_set_hikari_config_impl = None
 CORE_VERSION = ""
+
+
+def guarded_set_hikari_config(**kwargs):
+    """``set_hikari_config`` 的包装版：先接管模板清单同步，再转发给上游实现。
+
+    为什么必须包在**调用点**、而不只是包 ``hikari_core`` 里那个名字：上游自己会在
+    ``set_hikari_config`` **内部**（``core/config.py`` 第 123-124 行，仅在 ``_initial_scheduler``
+    为真时）再调一次 ``update_template()``。那次调用发生在我们的抑制窗口之外，会把一模一样的
+    ConnectTimeout traceback 原样打进启动日志 —— 实测确认过（表现为"WARNING 之后又跟一段
+    ERROR traceback"）。
+
+    :func:`sync_templates_quietly` 自身幂等：**第一次**调用时它真正做网络检查，
+    之后只是空转；而后续任何同步请求（含上游自己那次、以及 4 点/12 点的定时任务）
+    都由 :func:`install_template_sync_guard` 装上的替身接管，走同一套判定。
+
+    ⚠️ 本函数必须定义在下面的 `from hikari_core import ...` **之前**：那个 try 块在成功分支里
+    就把模块级 ``set_hikari_config`` 换成本函数，定义晚了会 NameError（实测踩到）。
+
+    :param kwargs: 原样转发给上游的配置项。
+    """
+    # ⚠️ 必须在调用上游之前重新读模块级名字：测试会替换 `set_hikari_config`，
+    #    若用定义时的旧引用就会"包自己"或绕过替换。
+    original = globals().get('set_hikari_config')
+    if original is guarded_set_hikari_config:
+        original = _set_hikari_config_impl
+    if original is None:                       # 依赖缺失：交给调用方按 CORE_ERROR 处理
+        return None
+    # 只在真正传了配置时接管；启动期零参数的 apply_config({}) 不需要。
+    if kwargs:
+        sync_templates_quietly()
+    return original(**kwargs)
+
 
 try:
     from hikari_core import (
@@ -194,8 +251,20 @@ try:
     Hikari_Model = _Hikari_Model
     callback_hikari = _callback_hikari
     init_hikari = _init_hikari
-    set_hikari_config = _set_hikari_config
     CORE_VERSION = str(_core_version)
+    # 把上游实现存起来，再把模块级名字换成"带模板同步自保层"的包装版。
+    # ⚠️ 必须一起换：apply_config 调的是模块级 set_hikari_config；只包 hikari_core 那边的话，
+    #    上游在 set_hikari_config 内部那次 update_template() 仍会在抑制窗口之外打出堆栈 ——
+    #    这正是本机用死代理实测到的"WARNING 之后又跟一段 ERROR traceback"。
+    _set_hikari_config_impl = _set_hikari_config
+    set_hikari_config = guarded_set_hikari_config
+    # ⚠️ 必须把上游签名映射到包装函数上。apply_config 会用
+    #    `inspect.signature(set_hikari_config)` 裁剪参数，包装函数若是光秃秃的
+    #    `(**kwargs)`，裁剪结果只剩 `{'kwargs'}`，**所有配置项会被静默丢掉** ——
+    #    表现为"选 firefox 却用 chromium、image_type 也不生效"。
+    #    这两个属性也是标准做法（等价于 functools.wraps 的效果）。
+    guarded_set_hikari_config.__signature__ = inspect.signature(_set_hikari_config)
+    guarded_set_hikari_config.__wrapped__ = _set_hikari_config
 except Exception as exc:  # pragma: no cover - 仅部署期会走到
     CORE_ERROR = f"{type(exc).__name__}: {exc}"
     logger.error(f"无法导入 hikari_core：{CORE_ERROR}")
@@ -213,6 +282,307 @@ ACTIVE_TOKEN: str | None = None
 ACTIVE_TOKEN_SOURCE = ''
 # 已解析成功的禁用功能函数列表（--ignore-list 的结果，见 resolve_ignore_list）
 ACTIVE_IGNORE: list = []
+
+
+# ── 模板清单同步的自保层（见 sync_templates_quietly / template_failure_is_transient）──
+# 模板目录 = `.hikari-deps/hikari_core/Template`，随 hikari-core 一起安装。
+# 背景：上游 `core/config.py` 第 123-124 行在**首次** `set_hikari_config` 时直接调
+# `update_template()`；该函数把"检查更新时握手超时"这种无关痛痒的失败也用
+# `logger.error(traceback.format_exc())` 汇报，于是启动日志里出现一大段像崩溃的堆栈。
+# 实测（本机）：渲染用的模板早就装好了，模板清单（OSS）连不上时渲染照常出图。
+TEMPLATE_SYNC_ATTEMPTS = 2               # 首次 + 重试 1 次
+TEMPLATE_SYNC_RETRY_DELAY_S = 2.0        # 重试前等待：给 TLS 握手/网络一点恢复时间
+# 每个进程只需检查一次：上游的模板同步只在 `_initial_scheduler` 为真时发生一次，
+# 而它是否已经跑过是模块私有状态。这里用乐观标志避免「每次查询都白等一次网络超时」。
+_template_sync = {'done': False, 'checked': False}
+
+# 瞬时故障的特征串：出现在截获到的日志文本里即认为"重试有意义"。
+# 只覆盖网络/TLS 一类，**故意不含文件写入与解析类异常**（见 template_failure_is_transient）。
+# ⚠️ 三种"超时"写法都要列：Python 内建 `TimeoutError`、httpx 的 `TimeoutException`、
+#    httpcore 文案 `Read timed out.` —— 漏掉任一都会把可重试的故障误判成确定性故障。
+# 中文两条（`请求超时了…` / `链接池异常…`）来自上游 core/http_error_handler.py 的
+# Timeout / PoolTimeout 分支文案。
+_TRANSIENT_MARKERS = (
+    'ConnectError', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout',
+    'PoolTimeout', 'TimeoutError', 'TimeoutException', 'RemoteProtocolError',
+    'ProxyError', 'handshake operation timed out', 'timed out',
+    'Connection reset', '超时', '链接池异常',
+)
+
+
+def template_failure_is_transient(messages) -> bool:
+    """判断一批日志里有没有"瞬时网络故障"特征（宽判定，主要给测试与人工排查用）。
+
+    ⚠️ 真正决定"重试/降级"的是另外两个更精确的判定，别用本函数下判断：
+    重试看 :func:`is_retryable_manifest_failure`，降级看 :func:`record_is_benign_transport_failure`。
+
+    :param messages: 截获到的日志正文序列。
+    :returns: 命中任一瞬时特征返回 ``True``。
+    """
+    for text in messages or ():
+        # 大小写不敏感：不同库打出来的是 `Read timed out.` / `ReadTimeout` 两种写法。
+        low = str(text).lower()
+        for marker in _TRANSIENT_MARKERS:
+            if marker.lower() in low:
+                return True
+    return False
+
+
+# 传输层故障的特征串：命中即认为这条 ERROR **不值得**把堆栈给用户看。
+# 比 _TRANSIENT_MARKERS 窄 —— 这里只看网络/连接类，不含 `超时`、`链接池异常` 这类
+# 也可能是"服务器真有问题"的措辞。漏判的代价只是"多留一段堆栈"，不是错误降级。
+_TRANSPORT_MARKERS = (
+    'ConnectError', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout',
+    'RemoteProtocolError', 'ProxyError', 'handshake operation timed out',
+    'timed out', 'Connection reset',
+)
+
+
+def record_is_benign_transport_failure(text) -> bool:
+    """判断一条 ERROR 日志是否只是"拉取模板清单时连不上网"这类**无害**故障。
+
+    命中时自保层会把整段 traceback 换成一行 WARNING —— 本地模板已经装好，渲染不受影响。
+    实测：本机用不监听的代理启动桥接，这里判定成立，启动日志里再没有出现模板相关堆栈。
+
+    刻意比 :func:`template_failure_is_transient` 更严格：**必须同时**满足
+    "含 Traceback 字样" 且 "带网络类异常类型"。这样才能把两种失败分开：
+
+    * 拉清单失败 → 一条 ``traceback.format_exc()``（带 ConnectTimeout 等类型名）→ 无害；
+    * 单个模板文件下载失败 → ``模板 x 更新失败: <异常>``（**没有** Traceback 字样）→ 保留 ERROR，
+      因为"某个模板文件取不到"是值得知道的真问题。
+
+    :param text: 单条日志正文。
+    """
+    body = str(text or '')
+    if 'Traceback' not in body:
+        return False
+    low = body.lower()
+    return any(m.lower() in low for m in _TRANSPORT_MARKERS)
+
+
+def is_retryable_manifest_failure(records) -> bool:
+    """判断这次失败是否值得重试：**清单拉取**失败，而不是个别模板文件下载失败。
+
+    依据：上游唯一写出 ``traceback.format_exc()`` 的地方就是 ``update_template`` 最外层
+    那个 try/except —— 正是拉清单那一步；个别文件失败走的是每文件一条
+    ``logger.error(f'模板 …')``，重试同一个坏文件没有意义。
+
+    :param records: 截获到的日志正文序列。
+    """
+    return any('Traceback' in str(t) for t in records or ())
+
+
+def _collect_loguru_messages(fn):
+    """执行 ``fn`` 并截获它在 ERROR 级写出的日志，返回 ``(fn 的返回值, 截获到的文本列表)``。
+
+    实现要点（踩过坑，勿改）：
+
+    * 必须用 loguru 的 ``filter`` 做**抑制**，不能用"临时挂一个 sink 再去 remove"那套：
+      loguru 的 sink 不可重入 —— 在 sink 里调 :func:`logger.remove` 会抛
+      ``RuntimeError: Could not acquire internal lock ...``（而且它只会打印一条
+      "Logging error in Loguru Handler" 到 stderr，原始 ERROR 依旧会正常落到别的 sink）。
+      最初就是这么做，结果"降级"完全没生效。
+    * 过滤开关 ``_suppress_errors`` 是模块级布尔值，且整个函数体**没有 await**，
+      因此不存在"异步 sink 稍后看到已复位开关"的竞态。
+    * 只拦 ERROR：清单为空、磁盘错误等确定性故障需要能被上层原样重放。
+
+    :param fn: 无参可调用对象（即上游的 ``update_template``）。
+    """
+    global _suppress_errors
+    records: list = []
+    # 注意 loguru 的 sink 只接受**一个**参数（0.7.3 实测：两参 lambda 会让 handler 报
+    # "Logging error in Loguru Handler"，且 `ref=0` 不存在于 add() 签名里）。
+    # 好消息是上游全部用 ``logger.error(<字符串>)`` 而非 ``logger.exception``，
+    # 因此 ``record['exception']`` 恒为 None，完整 traceback 本来就在 message 里，不会丢。
+    sink_id = logger.add(lambda msg: records.append(str(msg)), level='ERROR', format='{message}')
+    _suppress_errors = True
+    try:
+        result = fn()
+    except Exception:                                            # noqa: BLE001
+        # 极端情况：连上游函数本身都抛了。返回 False 并把 traceback 交给调用方判定。
+        result, records = False, [traceback.format_exc()]
+    finally:
+        _suppress_errors = False
+        try:
+            logger.remove(sink_id)
+        except Exception:                                        # noqa: BLE001
+            pass
+    return result, records
+
+
+def sync_templates_once() -> tuple[bool, list, bool]:
+    """调用一次上游的 ``update_template``，并把它的日志截获下来。
+
+    为什么要截获：上游用 ``logger.error`` + 完整 traceback 汇报这次失败，哪怕只是
+    "检查更新时握手超时"。启动日志里因此会出现一大段看起来像崩溃的堆栈。
+
+    :returns: ``(是否成功, 截获到的日志文本列表, 本次是否真的执行了同步)``。
+        第三项为 ``False`` 表示上游已经把模板同步做过了（私有状态 ``_initial_scheduler``
+        是否已消费无法从外部读取，只能靠调用点保证顺序），此时前两项无意义。
+
+    :note: loguru 不可用时（理论上不会发生）退化为"直接调用 + 用标准库 logging 截获"。
+    """
+    if _IS_LOGURU:
+        result, records = _collect_loguru_messages(_template_sync_callable())
+        return bool(result), records, True
+
+    # 退化路径：标准库 logging（loguru 随 hikari-core 一起装，正常不会走到）
+    import logging
+
+    records = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):                                  # noqa: D102
+            records.append(record.getMessage())
+
+    handler = _Collect(level=logging.ERROR)
+    logger.addHandler(handler)
+    try:
+        return bool(_template_sync_callable()()), records, True
+    except Exception:                                            # noqa: BLE001
+        return False, [traceback.format_exc()], True
+    finally:
+        logger.removeHandler(handler)
+
+
+def _template_sync_callable():
+    """取出 ``hikari_core.features.system.update_template``。
+
+    上游是在 ``set_hikari_config`` **函数体内** ``from ...features.system import update_template``，
+    每次调用都重新取模块属性，所以替换模块属性即可生效 —— 这是在不改动 ``.hikari-deps``
+    里第三方源码（重装即被覆盖）的前提下挂自保层的唯一稳妥办法。
+
+    这里**只在第一次**把原函数记到 ``_template_sync`` 上：之后无论谁替换了模块属性，
+    都仍然调用最初的那个真实实现。若不做这层缓存，未来一旦真的包了 wrapper，
+    就会"包自己"形成无限递归。
+
+    :returns: 可调用的同步函数；拿不到上游函数时返回恒返回 ``True`` 的占位（视为"无事发生"）。
+    """
+    # 整段都要防御式：上游若改了模块布局（或测试里用的是残缺假包），这里失败不应该
+    # 让 set_hikari_config 的调用方炸掉 —— 模板同步只是锦上添花。
+    try:
+        import hikari_core.features.system as _system
+    except Exception as exc:                                     # noqa: BLE001
+        if not _template_sync.get('warned'):
+            _template_sync['warned'] = True
+            logger.debug(f'取不到 hikari_core.features.system（{type(exc).__name__}: {exc}），'
+                         f'跳过模板清单同步的日志降级')
+        return lambda: True
+
+    if 'original' not in _template_sync:
+        original = getattr(_system, 'update_template', None)
+        if original is None:
+            return lambda: True
+        _template_sync['original'] = original
+    return _template_sync['original']
+
+
+def install_template_sync_guard() -> bool:
+    """把 ``hikari_core.features.system.update_template`` 换成自保版（只做一次）。
+
+    为什么非包不可：上游 ``set_hikari_config`` 内部会**自己**再调一次 ``update_template()``
+    （``core/config.py`` 第 124 行）。我们的模块级包装只保证"调用 set_hikari_config 之前"
+    先同步过一次，而 :func:`sync_templates_quietly` 是幂等的 —— 上游那次调用会因此跑到
+    抑制窗口之外，把一模一样的 ConnectTimeout traceback 原样打进启动日志。
+    本机实测确认了这个顺序：先一行 WARNING，20 秒后又跟一段 ERROR traceback。
+
+    包好之后，上游那次调用变成"静默同步 + 结果按同一套策略处理"：
+    传输层故障 → 一行 WARNING；确定性故障 → 原样重放 ERROR。重复调用直接短路。
+
+    :returns: 安装成功（或已安装）返回 ``True``。
+    """
+    if _template_sync.get('guard_installed'):
+        return True
+    try:
+        import hikari_core.features.system as _system
+    except Exception:                                            # noqa: BLE001
+        return False
+    original = getattr(_system, 'update_template', None)
+    if original is None:
+        return False
+    # ⚠️ 顺序不能反：必须在替换之前先把"真正的上游实现"缓存下来。
+    #    否则 _template_sync_callable 缓存到的会是下面那个包装版，形成自己调自己 ——
+    #    表现为"场景函数一次都没被执行、什么日志都没有"（实测踩过）。
+    _template_sync['original'] = original
+
+    def guarded_update_template():
+        """upstream.update_template 的自保替身：不抛异常，日志按策略降级。"""
+        if _template_sync.get('done'):
+            return True                        # 启动期已经同步过，别重复打网络请求
+        _template_sync['done'] = True
+        ok, messages, _ran = sync_templates_once()
+        if not ok:
+            report_template_sync_failure(messages)
+        return ok
+
+    try:
+        _system.update_template = guarded_update_template
+    except Exception:                                            # noqa: BLE001
+        return False
+    # 让定时任务（core/config.py 的 cron）也走到自保层；它按名字取模块属性，所以能生效。
+    _template_sync['guard_installed'] = True
+    return True
+
+
+def sync_templates_quietly() -> None:
+    """在 hikari-core 首次配置**之前**调用，接管本次模板清单同步。
+
+    上游默认行为（``core/config.py`` 第 123-124 行）是直接 ``update_template()``：
+    一次网络抖动就会在启动横幅前打出整段 traceback，并让人误以为服务坏了。
+
+    本函数把这一段换成：
+
+    1. 先同步一次；失败且是**清单拉取**失败 → 等 :data:`TEMPLATE_SYNC_RETRY_DELAY_S` 秒重试；
+    2. 若失败原因只是"连不上网"（:func:`record_is_benign_transport_failure`），
+       无论重试几次，最终**只留一行 WARNING**，说明"继续用本地模板"；
+    3. 其余确定性故障（清单为空、磁盘错误、个别文件取不到）→ 原样把 ERROR 重放，绝不吞掉。
+
+    ⚠️ "可重试"与"可降级"是**两个独立判定**，不能合一：完全断网的机器上重试必然也失败，
+    若把二者混在一起，第二次失败又会把整段 traceback 打回来 —— 这正是本机用死代理
+    实测发现的。
+
+    全程**不抛异常**：模板同步只是锦上添花，绝不能因为它让桥接起不来。
+    同步成功时不产生任何额外输出（避免每次配置都刷日志）。
+
+    :side effect: 置位 :data:`_template_sync` 的 ``done``，保证每个进程只检查一次。
+    """
+    if _template_sync.get('done'):
+        return
+    # 先占位再执行：即使下面出意外也不至于每次查询都重跑一遍（那会白等一次网络超时）。
+    _template_sync['done'] = True
+    # 顺带把上游自己那次调用也接管掉（否则它会在抑制窗口之外打堆栈）。
+    install_template_sync_guard()
+
+    ok, messages, ran = sync_templates_once()
+    if ok or not ran:
+        return
+    for _ in range(max(0, TEMPLATE_SYNC_ATTEMPTS - 1)):
+        if not is_retryable_manifest_failure(messages):
+            break
+        time.sleep(TEMPLATE_SYNC_RETRY_DELAY_S)
+        ok, messages, _ran = sync_templates_once()
+        if ok:
+            logger.warning('模板清单首次检查失败（临时网络故障），重试后已同步完成')
+            return
+    report_template_sync_failure(messages)
+
+
+def report_template_sync_failure(messages) -> None:
+    """按策略汇报一次模板同步失败：无害的降级为一行 WARNING，其余原样重放 ERROR。
+
+    :param messages: 截获到的 ERROR 日志正文序列。
+    """
+    if any(record_is_benign_transport_failure(m) for m in messages):
+        # 只取最后一行当摘要：完整 traceback 已经拦下，没必要再泼一屏给用户。
+        first = next((m for m in messages if str(m).strip()), '网络超时')
+        lines = str(first).strip().splitlines()
+        detail = lines[-1].strip() if lines else '网络超时'
+        logger.warning(f'模板清单检查临时失败，已跳过本次模板更新，继续使用本地模板（不影响查询）：{detail}')
+    else:
+        # 确定性故障：不能降级。把上游的 ERROR 原样重放，保持原有的可诊断性。
+        # 末尾多余的换行要剥掉：上游那条 traceback 本身就以换行结尾，loguru 还会再加一个。
+        for text in messages:
+            logger.error(str(text).rstrip('\n'))
 
 
 def resolve_ignore_list(names) -> list:
@@ -334,6 +704,10 @@ def apply_config(overrides: dict | None = None) -> None:
         kwargs = {k: v for k, v in kwargs.items() if k in accepted}
     except Exception:
         pass
+    # 上游的模板清单同步只会在**第一次** set_hikari_config 时执行（core/config.py:119）。
+    # 提前把这一小段接管掉：网络抖动时只重试一次并留一行 WARNING，而不是泼一整段 traceback。
+    # 本函数幂等且不抛异常，放在这里可以覆盖"启动时有 --token"和"首次查询才带 token"两条路径。
+    sync_templates_quietly()
     set_hikari_config(**kwargs)
     ACTIVE_TOKEN = token
     ACTIVE_TOKEN_SOURCE = token_source

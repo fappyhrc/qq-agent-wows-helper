@@ -42,6 +42,19 @@ spec.loader.exec_module(bridge)
 
 fails = []
 
+# ── 回归：模板同步自保层包装后，必须暴露上游签名 ──────────────────────────────
+# apply_config 用 `inspect.signature(set_hikari_config)` 裁剪参数。自保层把
+# set_hikari_config 换成了 `(**kwargs)` 的包装函数，一旦忘了映射 __signature__，
+# 裁剪结果只剩 {'kwargs'}，**所有配置项被静默丢掉**（实测：设置了 firefox 却仍用
+# chromium，且毫无报错）。这条断言就是防它回归。
+import inspect  # noqa: E402
+
+_sig = inspect.signature(bridge.set_hikari_config)
+if 'use_broswer' not in _sig.parameters:
+    fails.append(f'包装后 set_hikari_config 没暴露上游签名（实际参数 {list(_sig.parameters)}）')
+else:
+    print('set_hikari_config 签名 =', _sig)
+
 bridge.apply_config({'image_type': 'webp', 'use_browser': 'firefox', 'http2': False, 'unknown_key': 'x'})
 called = set_hikari_config.called
 print('called =', called)

@@ -124,6 +124,8 @@ plugins/wows-helper/
 │   ├── verify_params.py        核对 init_hikari 入参与 Ignore_List 是否真生效
 │   ├── verify_node.mjs         真实通路端到端核验（真桥接 + Node fetch）
 │   ├── test_config_mapping.py  桥接侧配置映射与凭据来源自检
+│   ├── test_render_retry.py    渲染失败识别与自动重试自检
+│   ├── test_template_sync.py   模板清单同步自保层自检（重试 / 降级 / 不吞错）
 │   └── client-test.mjs         客户端契约自检（假桥接，覆盖 6 类响应）
 ├── selfcheck.mjs               本地逻辑自检（68 项）
 ├── e2e-test.mjs                端到端自检（55 项，需起本地 HTTP 假桥接）
@@ -138,9 +140,13 @@ plugins/wows-helper/
 
 | 路径 | 体积 | 说明 |
 |---|---|---|
-| `.hikari-src/` | ~1 MB | `start-bridge.ps1` 下载的 Hikari-core-v2 源码 |
-| `.hikari-deps/` | ~145 MB | `pip --target` 安装的依赖 |
-| `data/wows-yuyuko/` | ~740 MB | hikari-core 缓存：chromium、船图、模板 |
+| `.hikari-src/` | ~1 MB | `start-bridge.ps1` 下载的 Hikari-core-v2 源码（含自带的 31 个模板文件） |
+| `.hikari-deps/` | ~145 MB | `pip --target` 安装的依赖；**渲染真正使用的 54 个模板文件在 `hikari_core/Template`** |
+| `data/wows-yuyuko/` | ~740 MB | hikari-core 缓存：chromium、船图（`ship_cache`，1902 个文件） |
+
+> 模板不是运行时从网络拉的：它跟 hikari-core 一起安装进 `.hikari-deps/hikari_core/Template`
+> （43 个 `.html` + 5 个 `.css` + 5 个 `.js` + 1 个许可文件，约 4.0 MB）。网络只用于
+> "检查有没有新版本"，拉不到清单不影响出图 —— 详见 §10.5。
 
 ---
 
@@ -430,6 +436,16 @@ yuyuko 凭据的**主通路是插件设置页**：它让不敲命令行、不配
 启动参数 `--token` 保留给无人值守部署；两处都没有时，查询会返回一条
 "去哪里填"的明确提示，而不是让上游抛出"未授权"。
 
+**⑦ 无害的网络故障不该在启动日志里刷出一段堆栈。**
+上游把"模板检查更新时连不上网"也用 `logger.error(traceback.format_exc())` 汇报，
+启动日志因此常出现一段像崩溃的堆栈，而本地模板早已装好、出图完全不受影响。
+桥接层把 `update_template` 与调用它的 `set_hikari_config` 一并接管：**只用网络特征**
+判断无害并降级为一行 WARNING，确定性故障仍原样保留 ERROR。
+这里有两处只有实测才会发现的坑，都已写进代码注释：loguru 的 sink **不可重入**
+（在 sink 里 `logger.remove()` 会抛 `RuntimeError`，必须改用 `filter` 抑制），
+以及包装 `set_hikari_config` 后**必须映射 `__signature__`**
+（否则 `apply_config` 的签名裁剪会把所有配置项静默丢掉）。详见 §10.5。
+
 ---
 
 ## 10. 自检与排障
@@ -449,6 +465,10 @@ node plugins/wows-helper/bridge/client-test.mjs
 
 # 桥接侧配置映射与凭据来源自检（含上游 use_broswer 笔误的兼容）
 python plugins/wows-helper/bridge/test_config_mapping.py
+
+# 模板清单同步自保层自检（46 项：重试判定 / 日志降级 / 确定性故障不吞 / 幂等）
+# loguru 只装在 .hikari-deps，脚本会自动带上正确的 PYTHONPATH 重跑自己
+python plugins/wows-helper/bridge/test_template_sync.py
 
 # 提交前扫描：检查是否误纳入凭据或异常大文件
 node plugins/wows-helper/.precommit-scan.mjs
@@ -537,6 +557,31 @@ await page.goto(f"file://{temp_file}",
 
 > 相关自检：`python bridge/test_render_retry.py`（用真实错误文案驱动，
 > 覆盖失败识别、重试后成功、用尽次数、可关闭，以及"业务失败不重试"这一关键约束）。
+
+### 10.5 启动日志：哪些可以忽略，哪些必须看
+
+启动时上游会对模板做一次"检查更新"（拉 OSS 清单 → 逐文件比对 → 只写变化的部分）。
+模板**早已随 hikari-core 装在 `.hikari-deps/hikari_core/Template`**（54 个文件，约 4.0 MB），
+所以清单拉不到**不影响出图**。桥接层为此加了一层自保逻辑，把这类无害故障压成一行：
+
+| 日志 | 含义 | 要不要处理 |
+|---|---|---|
+| `WARNING 未加载 data_user 私有模块…wws auth 指令将提示未部署` | 上游的可选私有模块，本部署未提供 | 忽略（除非要用 `wws 授权`） |
+| `WARNING 模板清单检查临时失败，已跳过本次模板更新，继续使用本地模板（不影响查询）：httpx.ConnectTimeout…` | 拉模板清单时网络/TLS 抖动，已自动重试 1 次仍失败 | **可忽略**。当天 4 点 / 12 点的定时任务会重试，或下次启动自动追平 |
+| `WARNING 模板清单首次检查失败（临时网络故障），重试后已同步完成` | 同上，但重试成功了 | 忽略 |
+| `INFO 执行初始缓存更新... / 更新战舰资源完成` | 船图缓存检查（本地有 `ship_cache` 时很快） | 忽略 |
+| `INFO 管理员校验串已生成（请私信发送给机器人）：…` | 上游生成的随机串，用于鉴权指令 | 需要管理功能时才理会 |
+| `ERROR 初始化 hikari-core 配置失败: 'NoneType' object is not iterable` | **网络完全不通**且缓存也取不到时上游的崩溃点 | **必须看**：检查代理/网络后重启 |
+| `ERROR` + `Traceback` 里含 `update_template` | 模板同步出现**确定性**故障（清单为空、磁盘写入失败等） | **必须看**：这类不会降级，会原样打印 |
+| `ERROR` + `Traceback` 里含 `Page.goto` / `playwright` | 渲染阶段失败 | 见 §10.4（已自动重试一次） |
+
+设计要点：**"可重试"和"可降级"是两个独立判定**。只有"拉清单时连不上网"才降级成一行
+WARNING；个别模板文件下载失败、清单为空、磁盘错误等一律保留 ERROR，避免把真问题藏起来。
+另外，上游在 `set_hikari_config` 内部还会**自己**再调一次模板同步，桥接层把
+`update_template` 也一并接管，否则那次调用会跑在抑制窗口之外、照样打出一整段堆栈。
+
+> 相关自检：`python bridge/test_template_sync.py`（46 项，含"上游那次调用也被接管"
+> 与"确定性故障必须保留 ERROR"两条关键约束）。
 
 ---
 
