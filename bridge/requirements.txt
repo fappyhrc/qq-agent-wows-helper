@@ -1,0 +1,22 @@
+# wows-helper 桥接服务依赖说明
+#
+# ⚠️ 重要：**不要**直接 `pip install hikari-core`。
+#    PyPI 上那个 hikari-core 是旧项目（pydantic v1 + jinja2 架构），
+#    与本插件要用的 Hikari-core-v2 不是同一份代码。
+#
+# v2 仓库的 pyproject.toml 自带依赖，直接按源码安装即可：
+#
+#   git clone https://github.com/wows-yuyuko/Hikari-core-v2
+#   # Python 3.13/3.14 需要先把 requires-python 从 ">=3.11,<3.13" 放宽为 ">=3.11"
+#   pip install ./Hikari-core-v2
+#   python -m playwright install chromium
+#
+# 上面的两步（下载源码 + 放宽版本上限 + 安装 + 装浏览器）都已由
+# start-bridge.ps1 自动完成，推荐直接用一键脚本。
+#
+# 实测环境（本机 Python 3.14.7 / Windows）解析到的依赖版本，供参考：
+#   hikari-core 1.2.5   playwright 1.63.0   greenlet 3.5.6
+#   pillow 12.3.0       pydantic 2.13.5     httpx 0.28.1
+#   APScheduler 3.11.3  loguru 0.7.3        (全部有 cp314 官方 wheel)
+#
+# 这份文件保留给需要手工安装或锁版本的用户；不需要 pip install -r 它。

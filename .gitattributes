@@ -1,0 +1,16 @@
+# wows-helper · 仓库属性（.gitattributes）
+#
+# 目标：任何平台 clone 下来都得到同样的字节，且不要把"行尾差异"当成内容改动提交。
+# 注意：这里只放**属性**。像 core.quotePath 这种属于 git config，不能写进本文件
+# （写进来会被当成"无主模式"，Git 会告警甚至解析异常）。
+
+# 统一按 LF 入库：源文件都是手写的文本，混 CRLF 会让 diff 出现整文件变更。
+# Windows 上检出时 Git 会自动处理，工作区里的 CRLF 不会污染仓库。
+* text=auto eol=lf
+
+# 明确二进制（若将来有人把渲染图样例放进仓库）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary

@@ -1,0 +1,44 @@
+# wows-helper · 版本库排除清单
+#
+# 原则：只提交源码。运行时产物（依赖、浏览器、缓存）与任何可能含凭据的文件都不进库。
+#
+# ⚠️ 注意：规则行**不能**带行尾注释。git 会把 `.hikari-deps/    # 说明` 整行当成模式，
+#    结果就是"看起来排除了、其实没排除"。所以下面注释一律独占一行。
+
+# ── 桥接服务的运行时数据（最大的一块）────────────────────────────────────────
+# start-bridge.ps1 下载的 Hikari-core-v2 源码（含被放宽过的 pyproject）
+.hikari-src/
+# pip --target 装的依赖（约 145MB，含 playwright/pillow 二进制）
+.hikari-deps/
+# hikari-core 缓存：chromium(~600MB)、船图缓存(~150MB)、管理员校验串
+data/
+.hikari-src.tar.gz
+
+# ── 本地临时与日志 ───────────────────────────────────────────────────────────
+*.log
+.install.log*
+.probe/
+.probe2/
+bridge/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+
+# ── 编辑器 / 系统 ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+
+# ── 明确禁止：任何可能含真实凭据的本地文件 ───────────────────────────────────
+# yuyuko 凭据与桥接口令都可能在本地被随手存成这些名字
+.env
+.env.*
+*.token
+token.txt
+yuyuko-token.txt
+hikari-token.txt
+secret*.txt
+bridge-token.txt

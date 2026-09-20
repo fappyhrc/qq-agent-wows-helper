@@ -1,0 +1,237 @@
+{
+  "id": "wows-helper",
+  "name": "战舰世界助手（wws）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "群里有人 @机器人 并跟一句 wws <指令> 时（两个条件都要满足，与官方 wws 机器人一致），确定性地把指令交给 Hikari-core-v2（yuyuko 平台）查询并渲染成图片；查询到的数据同时注入上下文，由 Agent 决定怎么接话。",
+  "enabledByDefault": false,
+  "permissions": ["web_fetch"],
+  "capabilities": [],
+  "requires": [],
+  "settings": {
+    "triggerKeywords": ["wws", "@wws"],
+    "requireAt": true,
+    "bridgeUrl": "http://127.0.0.1:8788",
+    "bridgeToken": "",
+    "yuyukoToken": "",
+    "hookPrefetch": false,
+    "hookPrefetchTimeoutMs": 3600,
+    "requestTimeoutMs": 60000,
+    "autoSendImage": true,
+    "includeDataInContext": true,
+    "contextDataMaxChars": 1600,
+    "atTriggerUser": false,
+    "replyToTrigger": false,
+    "platform": "QQ",
+    "platformIdOverride": "",
+    "botId": "0",
+    "commandLanguage": "zh",
+    "imageType": "jpeg",
+    "gamePath": "",
+    "proxy": "",
+    "useBrowser": "chromium",
+    "http2": true,
+    "autoRendering": true,
+    "autoImage": true,
+    "serveImage": true,
+    "imageServerHost": "127.0.0.1",
+    "imageServerPort": 32801,
+    "imageTtlSec": 600,
+    "maxImageMB": 12,
+    "maxPending": 6,
+    "debug": false
+  },
+  "configSchema": {
+    "triggerKeywords": {
+      "type": "internal",
+      "label": "触发词",
+      "description": "默认 [\"wws\",\"@wws\"]。消息 @ 了机器人、且去掉 @提及 后的第一个词是触发词时认领；如需修改请编辑 data/config.json 里该插件的此项。"
+    },
+    "requireAt": {
+      "type": "boolean",
+      "label": "必须 @ 机器人才响应",
+      "description": "开启（默认，与官方 wws 机器人一致）：@机器人 + wws 两个条件都要满足。关闭：只要消息以 wws 开头就响应（群里聊到 wws 容易被抢话，不建议）。"
+    },
+    "bridgeUrl": {
+      "type": "string",
+      "label": "Hikari 桥接服务地址",
+      "description": "运行 bridge/hikari_bridge.py 的地址，默认 http://127.0.0.1:8788。"
+    },
+    "bridgeToken": {
+      "type": "string",
+      "label": "桥接服务口令",
+      "description": "可选。桥接启动时带了 --access-token 才需要填，两边必须完全一致；留空表示桥接不做口令校验（它默认只监听 127.0.0.1）。",
+      "secret": true
+    },
+    "yuyukoToken": {
+      "type": "string",
+      "label": "yuyuko API 凭据（必填）",
+      "description": "格式「账号ID:Token」，向 yuyuko 平台申请。查询数据全靠它，留空则每次查询都会提示未配置。填写后随查询下发给桥接服务，不需要改命令行或环境变量。若桥接是用 --token 启动的，这里可以留空。",
+      "secret": true
+    },
+    "hookPrefetch": {
+      "type": "boolean",
+      "label": "钩子内预取数据（默认关闭）",
+      "description": "默认关闭，且不建议打开：一次 wws 查询实测 6~10 秒（浏览器渲染出图），而钩子硬超时只有 5 秒，预取几乎必然超时，只会让每次 @wws 白等几秒再退回工具。开启的唯一场景是桥接服务与浏览器都极快。"
+    },
+    "hookPrefetchTimeoutMs": {
+      "type": "number",
+      "label": "预取超时（毫秒，仅在预取开启时生效）",
+      "description": "必须小于 4500 —— 钩子硬超时是 5 秒。实测一次 wws 查询要 5~13 秒，所以这个值基本不可能够用；保留它只是为了让预取在极快环境下有上限。",
+      "min": 500,
+      "max": 4500,
+      "step": 100
+    },
+    "requestTimeoutMs": {
+      "type": "number",
+      "label": "查询超时（毫秒）",
+      "description": "模型调用查询工具时的等待上限（含浏览器渲染）。实测热态 5~13 秒、首次运行还会更久（下载浏览器与船图缓存），默认 60000。",
+      "min": 3000,
+      "max": 300000
+    },
+    "autoSendImage": {
+      "type": "boolean",
+      "label": "把渲染图直接发到群里",
+      "description": "开启（推荐）：查询成功后由插件走发送队列把渲染图发出去，模型只负责接话。关闭：图片只交给模型，由它决定是否调 wows-send-image 发出。"
+    },
+    "includeDataInContext": {
+      "type": "boolean",
+      "label": "把查询数据注入上下文",
+      "description": "把 wws 返回的文本数据追加到触发消息后面，模型据此接话。关闭后模型只能通过工具拿数据。"
+    },
+    "contextDataMaxChars": {
+      "type": "number",
+      "label": "注入数据上限（字符）",
+      "description": "防止一条超长战绩把提示词撑爆，默认 1600。"
+    },
+    "atTriggerUser": {
+      "type": "boolean",
+      "label": "发图时 @ 触发者",
+      "description": "默认关闭（群里刷屏更少）。"
+    },
+    "replyToTrigger": {
+      "type": "boolean",
+      "label": "发图时引用触发消息",
+      "description": "默认关闭。"
+    },
+    "platform": {
+      "type": "enum",
+      "label": "平台标识",
+      "description": "传给 Hikari-core 的 platform（影响绑定与指令语言）。",
+      "options": [
+        { "value": "QQ", "label": "QQ（OneBot 群/私聊）" },
+        { "value": "QQ_CHANNEL", "label": "QQ 频道" },
+        { "value": "QQ_OFFICIAL", "label": "QQ 官方机器人" }
+      ]
+    },
+    "platformIdOverride": {
+      "type": "string",
+      "label": "强制覆盖 PlatformId",
+      "description": "留空 = 用触发者 QQ 号（默认，绑定数据按人走）。填了则所有查询都用这个 ID。"
+    },
+    "botId": {
+      "type": "string",
+      "label": "BotId",
+      "description": "Hikari-core 要求的机器人自身标识，默认 0。"
+    },
+    "commandLanguage": {
+      "type": "enum",
+      "label": "指令语言",
+      "description": "Hikari-core 报错/帮助的语言。",
+      "options": [
+        { "value": "zh", "label": "中文" },
+        { "value": "en", "label": "English" }
+      ]
+    },
+    "imageType": {
+      "type": "enum",
+      "label": "出图格式",
+      "description": "jpeg 最小最快；png 最清晰但体积大。",
+      "options": [
+        { "value": "jpeg", "label": "jpeg（推荐）" },
+        { "value": "png", "label": "png" },
+        { "value": "webp", "label": "webp" }
+      ]
+    },
+    "gamePath": {
+      "type": "string",
+      "label": "缓存目录（game_path）",
+      "description": "留空 = 由桥接服务用它自己的默认目录。填了必须是桥接服务所在机器上的路径。"
+    },
+    "proxy": {
+      "type": "string",
+      "label": "访问 WG 的代理",
+      "description": "例如 http://127.0.0.1:7890；留空 = 直连。"
+    },
+    "useBrowser": {
+      "type": "enum",
+      "label": "渲染浏览器",
+      "description": "chromium 性能更好；渲染异常时可换 firefox。",
+      "options": [
+        { "value": "chromium", "label": "chromium（推荐）" },
+        { "value": "firefox", "label": "firefox" }
+      ]
+    },
+    "http2": {
+      "type": "boolean",
+      "label": "启用 HTTP/2",
+      "description": "默认开启。网络环境异常时可关掉重试。"
+    },
+    "autoRendering": {
+      "type": "boolean",
+      "label": "自动套用模板",
+      "description": "关闭后只返回数据不渲染图片（调试用）。"
+    },
+    "autoImage": {
+      "type": "boolean",
+      "label": "自动截图出图",
+      "description": "关闭后返回 HTML 文本而不是图片（调试用）。"
+    },
+    "serveImage": {
+      "type": "boolean",
+      "label": "启动本地图片服务",
+      "description": "把渲染图挂在 http://127.0.0.1:端口 上，供发送队列和模型直接取用；端口被占用时自动退回文件/base64 通道。"
+    },
+    "imageServerHost": {
+      "type": "string",
+      "label": "图片服务监听地址",
+      "description": "默认 127.0.0.1（仅本机）。改成 0.0.0.0 表示协议端在别的机器上也能取图。"
+    },
+    "imageServerPort": {
+      "type": "number",
+      "label": "图片服务端口",
+      "description": "默认 32801。"
+    },
+    "imageTtlSec": {
+      "type": "number",
+      "label": "渲染图保留时长（秒）",
+      "description": "默认 600。协议端与模型都在这段时间内取图，过期自动清理。"
+    },
+    "maxImageMB": {
+      "type": "number",
+      "label": "渲染图体积上限（MB）",
+      "description": "超过则拒绝发送并提示，默认 12。"
+    },
+    "maxPending": {
+      "type": "number",
+      "label": "多选会话保留数",
+      "description": "wws 需要用户回序号时（如重名舰船），保留的待选会话数量，默认 6。"
+    },
+    "debug": {
+      "type": "boolean",
+      "label": "调试日志",
+      "description": "打印每次识别的指令、桥接请求与耗时。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "wows-helper-rules",
+        "title": "战舰世界（wws）数据",
+        "priority": 60,
+        "content": "消息里以 wws 开头的是战舰世界查询指令（Hikari/yuyuko 数据源），系统已自动查询并附上真实数据。规则：\n1. 只有【wws 自动查询结果】块里的数字是真的，一律照抄，禁止凭印象编造成绩、胜率、场次或舰船名。数据块缺失或报错时，就说明这一句查不到，不要瞎猜。\n2. 结果里若写「渲染图已由插件自动发出」，说明图已经发了，不要再调发送工具去发同一张图；只有写「渲染图未发送（自动发送已关闭）」时才需要调 wows-helper__wows-send-image。\n3. 结果若写「需要用户回复序号」，就用一句话把待选项念给群友听并请对方回序号（对方下一句直接回数字即可，会带着上下文再次查询）。\n4. 接话按群里的语气来：可以只对数据做一句人话点评，也可以只发图不说话；不要逐项念表格。"
+      }
+    ]
+  }
+}
