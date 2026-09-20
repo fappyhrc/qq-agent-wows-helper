@@ -47,7 +47,13 @@ const bridge = http.createServer((req, res) => {
         }));
         return;
       }
-      res.end(JSON.stringify({ ok: true, status: 'wait', text: '请选择', options: [{ name: '大和' }, { name: '大和改' }] }));
+      res.end(JSON.stringify({
+        ok: true, status: 'wait', text: '请选择',
+        options: [{ name: '大和' }, { name: '大和改' }],
+        // ⚠️ 多选也要带图：上游会渲染一张"选择列表图"（select-ship-v6.html）。
+        //    插件必须把它直接发出去，用户才知道要选什么。
+        image_base64: PNG.toString('base64'), image_mime: 'image/png', data_type: 'png'
+      }));
       return;
     }
     res.end(JSON.stringify({
@@ -248,8 +254,19 @@ check(ctx.session.sent.length === 1, '渲染图写进了会话留档');
 const lastImage = plugin.internals.lastResult.get('group:12345')?.image;
 check(typeof lastImage?.url === 'string' && lastImage.url.startsWith('http://127.0.0.1:32906/wows/'), '图片记录带本地图片服务 URL', JSON.stringify(lastImage?.url));
 
-console.log('— 工具：序号续查（钩子认领之后，真查询走这里）—');
-// 承接上面钩子挂起的会话：验证工具确实把 selectIndex 与 session_key 下发给桥接了。
+console.log('— 工具：多选（wait）时必须把选择列表图直接发出去 —');
+// 依据用户反馈：多选时插件只把选项拼成文字交给模型，图被丢掉 —— 群里看不到选项图，
+// 模型也只是照文字复述，用户不知道该怎么选。现在 wait 分支必须自己把图发出去。
+const sentBeforeWait = sent.length;
+const resWait = await tools.get('wows-query').execute(ctx, { command: 'wait' });
+check(String(resWait.content).includes('1. 大和'), '多选结果把待选项交给模型', String(resWait.content).slice(0, 200));
+check(sent.length === sentBeforeWait + 1, '选择列表图被直接发到群里（用户反馈的缺失点）');
+check(String(resWait.content).includes('选择列表图已由插件直接发出')
+  || String(resWait.content).includes('选择列表图已生成但发送失败'),
+  '明确告知模型"图已发出"（避免它重复发图）', String(resWait.content).slice(0, 260));
+check(String(resWait.content).includes('@机器人'), '提示模型让群友 @机器人 后回序号', String(resWait.content).slice(0, 260));
+
+console.log('— 工具：序号续查（钩子认领之后，真查询走这里）—');// 承接上面钩子挂起的会话：验证工具确实把 selectIndex 与 session_key 下发给桥接了。
 const sentBeforeSel = sent.length;
 const resSel = await tools.get('wows-query').execute(ctx, { command: 'wait', selectIndex: 2 });
 check(resSel.isError !== true, '续查走工具执行成功', JSON.stringify(resSel).slice(0, 200));

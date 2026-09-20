@@ -567,19 +567,79 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
     return { ok: false, text: `【wws 自动查询结果】\n指令：wws ${command}\n${TOKEN_MISSING_TEXT}` };
   }
 
+  // 出图：桥接把渲染结果以 base64 回传（浏览器端 Nunjucks 渲染只有 Python 侧能做）。
+  // 放在最前面：**多选时的选择列表图也要走同一条路** —— 否则模型只拿到一串选项文字，
+  // 群里看不到那张图，用户根本不知道要选什么。
+  const attachImage = async (tag, platformIdForImage) => {
+    if (!data?.image_base64) return null;
+    try {
+      const buffer = Buffer.from(String(data.image_base64), 'base64');
+      const saved = await saveImage(buffer, {
+        mime: data.image_mime || dataType || c.imageType,
+        tag,
+        ttlSec: c.imageTtlSec,
+        maxEntries: 20
+      });
+      const url = imageServer.urlFor(saved.token);
+      if (url) attachUrl(saved.token, url);
+      if (saved.bytes > c.maxImageMB * 1024 * 1024) {
+        warn(`渲染图 ${(saved.bytes / 1048576).toFixed(1)}MB 超过上限 ${c.maxImageMB}MB，已跳过发送`);
+        return { ...saved, url, platformId: platformIdForImage, oversized: true, sent: false };
+      }
+      return { ...saved, url, platformId: platformIdForImage, sent: false };
+    } catch (error) {
+      warn(`渲染图暂存失败：${error?.message ?? error}`);
+      return null;
+    }
+  };
+
+  /**
+   * 把一张已暂存的图按当前配置发出去（引用触发消息 / @ 触发者）。
+   *
+   * @param {object|null} image `attachImage` 的返回值。
+   * @returns {Promise<object|null>} 发送结果；未发送时返回 `null`。
+   */
+  const autoSend = async (image) => {
+    if (!image || !c.autoSendImage || image.oversized) return null;
+    const info = await sendImageNow(ctx, image, {
+      replyToMessageId: c.replyToTrigger ? (triggerMsg.get(chatKey) ?? null) : null,
+      atUserId: c.atTriggerUser ? plat.platformId : null,
+      platformId
+    });
+    image.sent = info.ok;
+    if (info.ok) image.sentAt = Date.now();
+    if (!info.ok && c.debug) warn(`渲染图自动发送失败：${info.error}`);
+    return info;
+  };
+
   // ── 多选：把待选项挂起，等用户回序号（他下一句靠 pending 认领）──
   if (status === 'wait' && options?.length) {
     rememberPending(sessionKey, options, c.maxPending, command);
     rememberSender(chatKey, platformId);
+    // ⚠️ 这张"选择列表图"必须**直接发出去**：用户要在图里看选项，再由模型 @ 他回序号。
+    //    早期这里只把选项拼成文字交给模型，图被丢掉了 —— 群里既看不到选项图，
+    //    模型也只是照着文字复述，用户完全不知道该怎么选。
+    const image = await attachImage(`wws ${command}（多选）`, platformId);
+    const sentInfo = await autoSend(image);
     const label = selectIndex == null ? command : `${command}（续查 · 选择 ${selectIndex}）`;
     const out = [
       '【wws 自动查询结果】',
       `指令：wws ${label}`,
       waitingHint(c.requireAt),                       // 与钩子路径共用一份文案
+      image
+        ? (sentInfo?.ok
+          ? '选择列表图已由插件直接发出（群友照着图回序号即可）。不要再用 wows-send-image 重复发这张图。'
+          : '选择列表图已生成但发送失败（见桥接日志）。不要用文字编造选项，据实说明图片没发出去。')
+        : '',
       text ? `服务端提示：${clip(text, 300)}` : '',
-      '待选项：',
+      '待选项（与图中一致）：',
       formatOptions(options)
     ].filter(Boolean).join('\n');
+    // 留档：这张图也在 lastResult 里，用户要求重发时有据可依
+    lastResult.set(chatKey, {
+      at: Date.now(), text: out, dataType, command,
+      image: image ? { ...image, sent: !!sentInfo?.ok } : null
+    });
     return { ok: true, text: out, status };
   }
 
@@ -604,41 +664,9 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
     sentInfo: null
   };
 
-  // 出图：桥接把渲染结果以 base64 回传（浏览器端 Nunjucks 渲染只有 Python 侧能做）
-  if (data?.image_base64) {
-    try {
-      const buffer = Buffer.from(String(data.image_base64), 'base64');
-      const saved = await saveImage(buffer, {
-        mime: data.image_mime || dataType || c.imageType,
-        tag: `wws ${command}`,
-        ttlSec: c.imageTtlSec,
-        maxEntries: 20
-      });
-      const url = imageServer.urlFor(saved.token);
-      if (url) attachUrl(saved.token, url);
-      if (saved.bytes > c.maxImageMB * 1024 * 1024) {
-        warn(`渲染图 ${(saved.bytes / 1048576).toFixed(1)}MB 超过上限 ${c.maxImageMB}MB，已跳过发送`);
-        result.image = { ...saved, url, platformId, oversized: true, sent: false };
-      } else {
-        result.image = { ...saved, url, platformId, sent: false };
-      }
-    } catch (error) {
-      warn(`渲染图暂存失败：${error?.message ?? error}`);
-    }
-  }
-
   // 默认直接发图：模型不会主动发它看不见的图，等它判断的结果通常是"群里什么都没有"。
-  if (result.image && c.autoSendImage && !result.image.oversized) {
-    const info = await sendImageNow(ctx, result.image, {
-      replyToMessageId: c.replyToTrigger ? (triggerMsg.get(chatKey) ?? null) : null,
-      atUserId: c.atTriggerUser ? plat.platformId : null,
-      platformId
-    });
-    result.sentInfo = info;
-    result.image.sent = info.ok;
-    if (info.ok) result.image.sentAt = Date.now();
-    if (!info.ok && c.debug) warn(`渲染图自动发送失败：${info.error}`);
-  }
+  result.image = await attachImage(`wws ${command}`, platformId);
+  result.sentInfo = await autoSend(result.image);
 
   lastResult.set(chatKey, { at: Date.now(), text: bodyText, dataType, command, image: result.image });
   if (lastResult.size > 50) {

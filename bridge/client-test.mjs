@@ -101,8 +101,12 @@ check(waitRes.status === 'wait', 'wait 状态透传');
 check(waitRes.options.length === 2, '待选项透传');
 const waitNote = buildContextNote({ command: 'single 大和', data: waitRes, autoSendImage: true, maxChars: 500 });
 check(waitNote.includes('1. 大和') && waitNote.includes('需要用户选择'), 'wait 能生成可用的上下文块', waitNote);
-// requireAt 默认开启时，提示必须写明"@机器人 + 序号"——否则用户回裸数字认不上
-check(waitNote.includes('@机器人 后回复序号'), '提示写明了回复方式（带 @）', waitNote);
+// requireAt 默认开启时，提示必须写明两件事：
+//   ① 让群友 **@机器人** 后回序号（否则他回裸数字认不上）；
+//   ② 选择列表图已由插件直接发出，模型不要再发一次。
+check(waitNote.includes('@机器人'), '提示写明了回复方式（带 @）', waitNote);
+check(waitNote.includes('选择列表图') && waitNote.includes('直接发'),
+  '提示说明选择列表图已发出（避免模型重复发图）', waitNote);
 const failRes = await bridgeQuery({ url, command: 'fail', platform: 'QQ', platformId: '1', timeoutMs: 5000 });
 check(failRes.status === 'failed', 'failed 透传');
 check(failRes.text === '未找到该玩家', '失败文案透传');

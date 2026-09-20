@@ -6,11 +6,16 @@
   "category": "utility",
   "description": "群里有人 @机器人 并跟一句 wws <指令> 时（两个条件都要满足，与官方 wws 机器人一致），确定性地把指令交给 Hikari-core-v2（yuyuko 平台）查询并渲染成图片；查询到的数据同时注入上下文，由 Agent 决定怎么接话。",
   "enabledByDefault": false,
-  "permissions": ["web_fetch"],
+  "permissions": [
+    "web_fetch"
+  ],
   "capabilities": [],
   "requires": [],
   "settings": {
-    "triggerKeywords": ["wws", "@wws"],
+    "triggerKeywords": [
+      "wws",
+      "@wws"
+    ],
     "requireAt": true,
     "bridgeUrl": "http://127.0.0.1:8788",
     "bridgeToken": "",
@@ -120,9 +125,18 @@
       "label": "平台标识",
       "description": "传给 Hikari-core 的 platform（影响绑定与指令语言）。",
       "options": [
-        { "value": "QQ", "label": "QQ（OneBot 群/私聊）" },
-        { "value": "QQ_CHANNEL", "label": "QQ 频道" },
-        { "value": "QQ_OFFICIAL", "label": "QQ 官方机器人" }
+        {
+          "value": "QQ",
+          "label": "QQ（OneBot 群/私聊）"
+        },
+        {
+          "value": "QQ_CHANNEL",
+          "label": "QQ 频道"
+        },
+        {
+          "value": "QQ_OFFICIAL",
+          "label": "QQ 官方机器人"
+        }
       ]
     },
     "platformIdOverride": {
@@ -140,8 +154,14 @@
       "label": "指令语言",
       "description": "Hikari-core 报错/帮助的语言。",
       "options": [
-        { "value": "zh", "label": "中文" },
-        { "value": "en", "label": "English" }
+        {
+          "value": "zh",
+          "label": "中文"
+        },
+        {
+          "value": "en",
+          "label": "English"
+        }
       ]
     },
     "imageType": {
@@ -149,9 +169,18 @@
       "label": "出图格式",
       "description": "jpeg 最小最快；png 最清晰但体积大。",
       "options": [
-        { "value": "jpeg", "label": "jpeg（推荐）" },
-        { "value": "png", "label": "png" },
-        { "value": "webp", "label": "webp" }
+        {
+          "value": "jpeg",
+          "label": "jpeg（推荐）"
+        },
+        {
+          "value": "png",
+          "label": "png"
+        },
+        {
+          "value": "webp",
+          "label": "webp"
+        }
       ]
     },
     "gamePath": {
@@ -169,8 +198,14 @@
       "label": "渲染浏览器",
       "description": "chromium 性能更好；渲染异常时可换 firefox。",
       "options": [
-        { "value": "chromium", "label": "chromium（推荐）" },
-        { "value": "firefox", "label": "firefox" }
+        {
+          "value": "chromium",
+          "label": "chromium（推荐）"
+        },
+        {
+          "value": "firefox",
+          "label": "firefox"
+        }
       ]
     },
     "http2": {
@@ -230,7 +265,7 @@
         "id": "wows-helper-rules",
         "title": "战舰世界（wws）数据",
         "priority": 60,
-        "content": "消息里以 wws 开头的是战舰世界查询指令（Hikari/yuyuko 数据源），系统已自动查询并附上真实数据。规则：\n1. 只有【wws 自动查询结果】块里的数字是真的，一律照抄，禁止凭印象编造成绩、胜率、场次或舰船名。数据块缺失或报错时，就说明这一句查不到，不要瞎猜。\n2. 结果里若写「渲染图已由插件自动发出」，说明图已经发了，不要再调发送工具去发同一张图；只有写「渲染图未发送（自动发送已关闭）」时才需要调 wows-helper__wows-send-image。\n3. 结果若写「需要用户回复序号」，就用一句话把待选项念给群友听并请对方回序号（对方下一句直接回数字即可，会带着上下文再次查询）。\n4. 接话按群里的语气来：可以只对数据做一句人话点评，也可以只发图不说话；不要逐项念表格。"
+        "content": "消息里以 wws 开头的是战舰世界查询指令（Hikari/yuyuko 数据源），系统已自动查询并附上真实数据。规则：\n1. 只有【wws 自动查询结果】块里的数字是真的，一律照抄，禁止凭印象编造成绩、胜率、场次或舰船名。数据块缺失或报错时，就说明这一句查不到，不要瞎猜。\n2. 结果若写「渲染图已由插件自动发出」或「选择列表图已由插件直接发出」，说明图已经发了，不要再调 wows-helper__wows-send-image 发同一张图，也不要说\"我看不到图\"；只有写「渲染图未发送（自动发送已关闭）」时才需要调这个工具。\n3. 结果若写「需要用户选择」：那张选择列表图**已经由插件直接发到群里了**，你不需要也不该再发一次图。你要做的只有一件事 —— 用一句话提醒群友**@机器人**后回复序号（例如「@机器人 2」），可以说\"看图选几\"。⚠️ 必须让他 @机器人：不 @ 的裸数字系统不会认，群里连续两句数字也没法判断在回谁。\n4. 待选项名字一模一样时（实测同一昵称下会出现多个同名项）属正常，照原样念序号即可，不要评论\"怎么有两个一样的\"，也不要替群友猜该选哪个。\n5. 接话按群里的语气来：可以只对数据做一句人话点评，也可以只发图不说话；不要逐项念表格。"
       }
     ]
   }
