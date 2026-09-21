@@ -53,8 +53,10 @@ eq(matchTrigger('@机器人(QQ:1) wws', ['wws'], BOT).command, '', '只有触发
 eq(matchTrigger('@机器人(QQ:1) WWS 大和', ['wws'], BOT).command, '大和', '大小写不敏感');
 eq(matchTrigger('@机器人(QQ:1) wws：大和', ['wws'], BOT).command, '大和', '中文冒号');
 eq(matchTrigger('  @机器人(QQ:1)   wws   roll 日本 战列舰 10 ', ['wws'], BOT).command, 'roll 日本 战列舰 10', '前导/多余空白');
-eq(matchTrigger('@wws 大和', ['wws'], { requireAt: false }).command, '大和', '@wws 直接叫触发词');
-eq(matchTrigger('@机器人(QQ:1) @wws 大和', ['wws'], BOT).command, '大和', '@机器人 之后再 @wws');
+// ⚠️ "@触发词 正文"（把触发词连 @ 一起打）**不再认领** —— 曾经有个 reused 兼容分支
+//    专门支持它，已砍掉：@ 是"叫某人"的语法，用它当触发词属意料之外的输入。
+eq(matchTrigger('@wws 大和', ['wws'], { requireAt: false }).matched, false, '@wws 不算触发词（reused 分支已砍）');
+eq(matchTrigger('@机器人(QQ:1) @wws 大和', ['wws'], BOT).matched, false, '@机器人 之后再 @wws 也不认');
 eq(matchTrigger('wws 大和', ['wws'], { requireAt: false, selfNames: [] }).matched, true, 'requireAt 关闭 → 只看触发词');
 eq(matchTrigger('[引用 某人：wws 大和]', ['wws'], { requireAt: false }).matched, false, '引用块不误触发');
 eq(matchTrigger('@机器人(QQ:1) wws 大和', ['wws', '@wws'], BOT).matched, true, '多触发词配置');
@@ -79,11 +81,10 @@ eq(matchTrigger('@机器人(QQ:1) 用 yuyuko 查一下', KW, BOT).matched, false
 // ⚠️ wws 已摘掉：老文案照抄会失效，必须有断言把它钉死，否则改回去没人发现
 eq(matchTrigger('@机器人(QQ:1) wws me', KW, BOT).matched, false, 'wws 不再是触发词（核验后只留 yuyuko）');
 eq(matchTrigger('@机器人(QQ:1) @wws me', KW, BOT).matched, false, '@wws 不再是触发词');
-// 反之，把触发词连 @ 一起打出来（"直接 @ 叫 yuyuko 这个名字"）仍然认领 ——
-// 这是 lib/trigger.js 里 reused 分支的**既有设计**，不是 wws 的残留：
-// 最后一个 @提及 的名字恰好等于触发词时，把它当成头部、后面的照常作指令。
-eq(matchTrigger('@机器人(QQ:1) @yuyuko me', KW, BOT).matched, true, '@机器人 之后再 @yuyuko 仍认领（既有设计）');
-eq(matchTrigger('@机器人(QQ:1) @yuyuko me', KW, BOT).command, 'me', '此时指令仍是 me');
+// 反之，把触发词连 @ 一起打出来**也不认领**了（reused 兼容分支已按用户要求砍掉）。
+// 注意 `@机器人 yuyuko me` 不受影响：那时 yuyuko 只是普通词，走 head 判断。
+eq(matchTrigger('@机器人(QQ:1) @yuyuko me', KW, BOT).matched, false, '@机器人 之后再 @yuyuko 不认领（已砍）');
+eq(matchTrigger('@机器人(QQ:1) yuyuko me', KW, BOT).matched, true, '正常写法不受影响');
 
 console.log('— 默认值一致性：lib/config.js 与 plugin.json 必须相同 —');
 // 两处各写一份默认值，历史上漂移过（plugin.json 改了、config.js 没改），
