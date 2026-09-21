@@ -13,11 +13,13 @@ r"""Hikari-core-v2 兼容性 / 性能探针（可选工具，桥接服务本身�
 
 实测结论（Windows / Python 3.14.7 / chromium / http2 关闭）：
   set_hikari_config 首次 ~150s（下载浏览器 + 18MB 船图缓存），之后几乎为 0
-  wws me          首次 39s，热态 10~13s
-  wws ship 大和    热态 6.4s
-  wws recent 7    热态 5.2s
-  wws <错指令>     0.00s（纯解析，不出图）
+  me              首次 39s，热态 10~13s
+  ship 大和        热态 6.4s
+  recent 7        热态 5.2s
+  <错指令>         0.00s（纯解析，不出图）
 → 单次查询远超钩子的 5 秒硬超时，所以插件默认 hookPrefetch=false，查询交给工具（无 5 秒限制）。
+
+注：群里输入时要带触发词，例如 `@机器人 yuyuko me`；本脚本直接调 SDK，所以这里只写指令正文。
 """
 import asyncio
 import sys

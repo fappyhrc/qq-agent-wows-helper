@@ -3,6 +3,7 @@
 // 不需要 Python，也不需要 QQ。
 // 用法：node plugins/wows-helper/e2e-test.mjs
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
 import * as plugin from './index.js';
 
 let pass = 0;
@@ -150,6 +151,35 @@ for (const [name, text, shouldFire] of cases) {
   check(fired === shouldFire, `${name} → ${shouldFire ? '认领' : '不认领'}`, e.text.slice(0, 60));
   check(bridgeReqs.length === before, `${name} → 钩子没有发起网络请求`);
 }
+
+console.log('— 钩子：触发词 yuyuko（线上默认）也要认领，且后面的内容原样作指令 —');
+// 用 plugin.json 里的**真实默认触发词**跑一遍，避免测试自己配一套而与线上漂移
+const manifestKeywords = JSON.parse(readFileSync(new URL('./plugin.json', import.meta.url), 'utf8'))
+  .settings.triggerKeywords;
+settings.triggerKeywords = manifestKeywords;
+check(manifestKeywords.includes('yuyuko'), 'plugin.json 默认触发词含 yuyuko', JSON.stringify(manifestKeywords));
+
+const yCases = [
+  [`@${BOT_NICK}(QQ:${BOT_QQ}) yuyuko ship 大和`, true, 'ship 大和'],
+  [`@${BOT_NICK}(QQ:${BOT_QQ}) yuyuko ship 大和 recent 30`, true, 'ship 大和 recent 30'],
+  [`@${BOT_NICK}(QQ:${BOT_QQ}) Yuyuko 大和`, true, '大和'],
+  [`@${BOT_NICK}(QQ:${BOT_QQ}) yuyuko`, true, ''],
+  ['yuyuko ship 大和', false, ''],                                  // 没 @ → 严格不认领
+  ['@老八(QQ:1000000001) yuyuko ship 大和', false, ''],              // @ 的是别人
+  [`@${BOT_NICK}(QQ:${BOT_QQ}) 用 yuyuko 查一下`, false, ''],         // 触发词在句中
+];
+for (const [text, shouldFire, wantCmd] of yCases) {
+  const e = { id: 89, senderId: '1000000001', senderName: '老八', text };
+  await plugin.hooks['before-context']({ triggerEntries: [e], chatKey: 'group:12345', ...ctxFields });
+  const fired = e.text.includes('【wws 指令已认领】');
+  check(fired === shouldFire, `${text.slice(-24)} → ${shouldFire ? '认领' : '不认领'}`,
+    e.text.slice(0, 80));
+  if (shouldFire && wantCmd) {
+    check(e.text.includes(`command="${wantCmd}"`),
+      `yuyuko 之后的内容原样作指令：${JSON.stringify(wantCmd)}`, e.text.slice(0, 120));
+  }
+}
+settings.triggerKeywords = ['wws', '@wws'];   // 还原，避免影响后续用例
 
 console.log('— 机器人身份未知时的兜底学习 —');
 // 模拟"钩子上下文里既没有 selfId 也没有昵称"的最坏情况（核心将来改字段也不至于全瘫）

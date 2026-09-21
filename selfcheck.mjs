@@ -1,9 +1,15 @@
 // wows-helper 自检脚本（不碰网络、不起外部服务，纯本地逻辑）
 // 用法：node plugins/wows-helper/selfcheck.mjs
+import { readFileSync } from 'node:fs';
 import { matchTrigger, parseSelectIndex, isBotMentioned, extractMentions } from './lib/trigger.js';
 import { buildContextNote, formatResultText, clip } from './lib/format.js';
 import { saveImage, getImage, attachUrl, clearAll } from './lib/image-store.js';
 import { start, stop, urlFor } from './lib/image-server.js';
+import { DEFAULTS } from './lib/config.js';
+
+// 线上真实默认触发词：直接用 lib/config.js 里的那份，避免测试自己另写一套而与配置漂移
+const DEFAULT_KEYWORDS = DEFAULTS.triggerKeywords;
+const requireAtDefault = () => DEFAULTS.requireAt;
 
 let pass = 0;
 let fail = 0;
@@ -49,6 +55,35 @@ eq(matchTrigger('@机器人(QQ:1) @wws 大和', ['wws'], BOT).command, '大和',
 eq(matchTrigger('wws 大和', ['wws'], { requireAt: false, selfNames: [] }).matched, true, 'requireAt 关闭 → 只看触发词');
 eq(matchTrigger('[引用 某人：wws 大和]', ['wws'], { requireAt: false }).matched, false, '引用块不误触发');
 eq(matchTrigger('@机器人(QQ:1) wws 大和', ['wws', '@wws'], BOT).matched, true, '多触发词配置');
+
+console.log('— 触发词：yuyuko 为主，且"后面的内容"原样转发给上游 —');
+// 用户要求：严格 @ 机器人 + 出现 yuyuko，然后把 yuyuko 之后的内容交给 Hikari-core-v2。
+// 这里用的就是**线上真实默认值**（从 lib/config.js 取），避免测试与配置漂移。
+const KW = DEFAULT_KEYWORDS;
+eq(Array.isArray(KW) && KW.includes('yuyuko'), true, '默认触发词含 yuyuko', JSON.stringify(KW));
+eq(KW.includes('wws'), true, 'wws 仍保留（上游帮助页与官方机器人用的就是它）', JSON.stringify(KW));
+eq(matchTrigger('@机器人(QQ:1) yuyuko ship 大和', KW, BOT).matched, true, '@机器人 + yuyuko → 认领');
+eq(matchTrigger('@机器人(QQ:1) yuyuko ship 大和', KW, BOT).command, 'ship 大和', 'yuyuko 之后的内容原样作指令');
+eq(matchTrigger('@机器人(QQ:1) yuyuko   recent 7', KW, BOT).command, 'recent 7', '多余空白被规整');
+eq(matchTrigger('@机器人(QQ:1) Yuyuko 大和', KW, BOT).command, '大和', '大小写不敏感');
+eq(matchTrigger('@机器人(QQ:1) yuyuko：大和', KW, BOT).command, '大和', '中文冒号分隔');
+eq(matchTrigger('@机器人(QQ:1) yuyuko', KW, BOT).command, '', '只有触发词 → 空指令（走帮助）');
+eq(matchTrigger('yuyuko ship 大和', KW, BOT).matched, false, '没 @ 机器人 → 严格不认领');
+eq(matchTrigger('yuyuko ship 大和', KW, BOT).reason, '没有 @ 机器人', '给出"没 @ 机器人"的原因');
+eq(matchTrigger('@老八(QQ:123) yuyuko ship 大和', KW, BOT).matched, false, '@ 的是别人 → 不认领');
+eq(matchTrigger('@机器人(QQ:1) 用 yuyuko 查一下', KW, BOT).matched, false, '触发词不在最前 → 不认领（宁可不触发）');
+eq(matchTrigger('@机器人(QQ:1) wws 大和', KW, BOT).command, '大和', '旧触发词 wws 仍然可用');
+eq(matchTrigger('@机器人(QQ:1) @yuyuko 大和', KW, BOT).command, '大和', '@yuyuko 直接叫触发词');
+
+console.log('— 默认值一致性：lib/config.js 与 plugin.json 必须相同 —');
+// 两处各写一份默认值，历史上漂移过（plugin.json 改了、config.js 没改），
+// 于是"重置设置"与"没设置过"行为不一致。这里直接读文件比对。
+const manifest = JSON.parse(readFileSync(new URL('./plugin.json', import.meta.url), 'utf8'));
+eq(JSON.stringify(DEFAULT_KEYWORDS), JSON.stringify(manifest.settings.triggerKeywords),
+  'config.js 与 plugin.json 的 triggerKeywords 一致',
+  `config=${JSON.stringify(DEFAULT_KEYWORDS)} plugin=${JSON.stringify(manifest.settings.triggerKeywords)}`);
+eq(manifest.settings.requireAt, true, 'plugin.json 的 requireAt 默认仍为严格 @');
+eq(requireAtDefault(), true, 'config.js 的 requireAt 默认仍为严格 @');
 
 console.log('— 边界：名字/号码的相似与包含 —');
 eq(isBotMentioned('@机器人小助手(QQ:9) wws 大和', BOT.selfNames), false, '名字包含"机器人"但不是本人 → 不算');

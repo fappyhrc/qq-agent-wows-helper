@@ -1301,9 +1301,9 @@ def install_yuyuko_timeout_guard() -> bool:
     是**每次查询最早发出**的请求之一，冷启动时它要完成 TLS 握手；实测数据：
 
     ```
-    accountId=2230984844 第1次  失败 ConnectError   5.07s   ← 被 5 秒掐断
-    accountId=2230984844 第2次  HTTP 200           7.95s   ← 同一请求其实要 8 秒
-    accountId=2054294369 第1次  HTTP 200           0.16s   ← 连接复用后很快
+    accountId=2000000003 第1次  失败 ConnectError   5.07s   ← 被 5 秒掐断
+    accountId=2000000003 第2次  HTTP 200           7.95s   ← 同一请求其实要 8 秒
+    accountId=2000000002 第1次  HTTP 200           0.16s   ← 连接复用后很快
     ```
 
     于是"第一次查询必失败、重试才成功"成了常态；网络再差一点（两次都超 5 秒）
