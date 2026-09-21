@@ -303,11 +303,11 @@ powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1 `
 不迁移的表现是"插件显示已启用，但每次查询都提示没配凭据"。
 
 **先关掉 QQ Agent**（改配置时它会回写 `data/config.json`，边改边写容易互相覆盖），
-然后编辑 `data/config.json`，把 `plugins` 下这个键**只改键名、整块值原样保留**：
+然后编辑 `data/config.json`，把 `skills` 下这个键**只改键名、整块值原样保留**：
 
 ```jsonc
 {
-  "plugins": {
+  "skills": {                   // ⚠️ 是 skills，不是 plugins
     "yuyuko-helper": {          // ← 原来是 "wows-helper"，值一个字都不用动
       "enabled": true,
       "yuyukoToken": "账号ID:Token",
@@ -320,9 +320,9 @@ powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1 `
 也可以用一条命令做（先备份，再解析 JSON 校验，避免手改漏了逗号）：
 
 ```powershell
-$p = 'data/config.json'
+$p = 'C:\QQ-Agent 0.4\data\config.json'
 Copy-Item $p "$p.bak" -Force
-node -e "const fs=require('fs');const f=process.argv[1];const j=JSON.parse(fs.readFileSync(f,'utf8'));const P=j.plugins||j.skills;if(P['wows-helper']&&!P['yuyuko-helper']){P['yuyuko-helper']=P['wows-helper'];delete P['wows-helper'];fs.writeFileSync(f,JSON.stringify(j,null,2));console.log('已迁移');}else{console.log('无需迁移或已迁移');}" $p
+node -e "const fs=require('fs');const f=process.argv[1];const j=JSON.parse(fs.readFileSync(f,'utf8'));const S=j.skills||j.plugins;if(S['wows-helper']&&!S['yuyuko-helper']){S['yuyuko-helper']=S['wows-helper'];delete S['wows-helper'];fs.writeFileSync(f,JSON.stringify(j,null,2));console.log('已迁移');}else{console.log('无需迁移或已迁移');}" $p
 ```
 
 迁移后 `data/config.json` 里不应再有 `wows-helper` 这个键。
@@ -668,6 +668,8 @@ node plugins/yuyuko-helper/bridge/verify_node.mjs 32941 "账号ID:Token" python
 | 提交时 `git diff` 里中文注释整个文件都变了 / 文件不再被识别为 UTF-8 | 用 `Add-Content` 以 ANSI 追加过内容（**本插件真的踩过**：`.gitignore` 末行注释被写成 GBK，整文件因此不是合法 UTF-8） | 用 UTF-8 重写该文件；追加文本请改用 `[System.IO.File]::AppendAllText($p,$s,[Text.Encoding]::UTF8)` 或 `Out-File -Encoding utf8` |
 | 想给插件目录改名，`Rename-Item` 报 `because it is in use` | 两个原因之一：QQ Agent 的热重载正监视 `plugins/`；或**某个 shell/进程的工作目录就在该目录里**（Windows 不允许重命名进程的 CWD）。逐项给子文件改名都能成功，就是典型症状 | 先退出 QQ Agent；再把执行重命名的 shell 的工作目录切到插件目录**之外**（例如 `plugins/` 或 `C:\`）再执行 |
 | 在别的目录执行 `node .precommit-scan.mjs`，输出"通过"但明显不对 | 该脚本曾用 `process.cwd()` 当扫描根，cwd 不对就会**静默扫错地方**（最危险的假阴性） | 已改为按脚本自身路径定位（`import.meta.url`）；旧版请勿再用 |
+| 查 `data/config.json` 想确认插件配置，`Get-Content -Raw \| ConvertFrom-Json` 报 `Invalid object passed in` | Windows PowerShell 5.1 把无 BOM 的 UTF-8 当 ANSI 读，中文被读成乱码，JSON 自然解析失败（**文件本身没问题**） | 用 Node 读：`node -e "console.log(JSON.parse(require('fs').readFileSync('data/config.json','utf8')).skills['yuyuko-helper'])"`；或 `Get-Content -Raw -Encoding UTF8` |
+| 在 `data/config.json` 里找不到本插件的配置 | 插件设置挂在 **`skills`** 下，不是 `plugins`（本项目没有 `plugins` 段） | 见 §4.5 的迁移片段 |
 
 排障时建议先开启插件的 `debug` 开关：日志会记录认领了哪条指令（含判定原因）、
 是否发起查询、耗时以及图片大小。
@@ -910,12 +912,12 @@ accountId=2000000002 第1次  HTTP 200           0.16s   ← 连接复用后很�
 
   | 受影响的东西 | 变化 |
   |---|---|
-  | 设置页配置 / `data/config.json` 的键 | 从 `"wows-helper"` 变为 `"yuyuko-helper"`；**旧键不会自动迁移**，不迁移就等于凭据、`enabled`、全部调优项丢失 |
+  | 设置页配置 / `data/config.json` 的键 | `skills` 下从 `"wows-helper"` 变为 `"yuyuko-helper"`；**旧键不会自动迁移**，不迁移就等于凭据、`enabled`、全部调优项丢失 |
   | 工具名 | `wows-helper__wows-query` → `yuyuko-helper__wows-query`（发送工具同理）；短名 `wows-query` / `wows-send-image` 不变 |
   | 提示词片段 id | `wows-helper-rules` → `yuyuko-helper-rules` |
   | 日志前缀 | `[skill:wows-helper]` → `[skill:yuyuko-helper]` |
 
-  迁移办法（本机已执行，见 §4.5）：把 `data/config.json` 里 `plugins` 下的
+  迁移办法（本机已执行，见 §4.5）：把 `data/config.json` 里 `skills` 下的
   `"wows-helper"` 这个键**只改键名、整块值原样保留**即可，凭据不用重填。
   别人的机器若没迁移，表现为"插件显示已开启但每次查询都说没配凭据"。
 
