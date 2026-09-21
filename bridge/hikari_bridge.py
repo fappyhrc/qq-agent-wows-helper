@@ -354,6 +354,15 @@ _template_sync = {'done': False, 'checked': False}
 # 渲染等待兜底（见 install_render_goto_guard）
 _render_goto = {'installed': False, 'original': None, 'relaxed': 0}
 
+# yuyuko 短超时接口的补时（见 install_yuyuko_timeout_guard）
+# 只列已确认的那一个：api.py:171/186 的 `check_yuyuko_cache` 用 POST 打这个地址且 timeout=5。
+# （api.py:202 的 get_wg_info 也是 5 秒，但它是 GET 且有 follow_redirects，不在本次范围内）
+YUYUKO_MIN_TIMEOUT_S = 20.0
+# 必须**同时**命中域名与路径：只认路径的话，任何第三方地址只要路径相同也会被改写
+YUYUKO_HOST_MARKER = 'wows.shinoaki.com'
+_YUYUKO_SHORT_TIMEOUT_URLS = ('/api/wows/cache/check',)
+_yuyuko_timeout = {'installed': False, 'original': None, 'bumped': 0}
+
 # 瞬时故障的特征串：出现在截获到的日志文本里即认为"重试有意义"。
 # 只覆盖网络/TLS 一类，**故意不含文件写入与解析类异常**（见 template_failure_is_transient）。
 # ⚠️ 三种"超时"写法都要列：Python 内建 `TimeoutError`、httpx 的 `TimeoutException`、
@@ -1283,6 +1292,78 @@ async def init_hikari_with_retry(*, platform: str, platform_id: str, bot_id: str
     return hikari, notes  # pragma: no cover - 循环必然在内部 return
 
 
+def install_yuyuko_timeout_guard() -> bool:
+    """把上游那两个 **5 秒** 硬超时的 yuyuko 接口放宽到与其它接口一致的 20 秒。
+
+    背景（本机实测，2026-09-21）：``features/api.py`` 里除两处外全是 ``timeout=20``，
+    唯独 ``api.py:171/186`` 的 ``check_yuyuko_cache``（``POST /api/wows/cache/check``）
+    与 ``api.py:202`` 的 ``get_wg_info`` 是 ``timeout=5``。而 ``check_yuyuko_cache``
+    是**每次查询最早发出**的请求之一，冷启动时它要完成 TLS 握手；实测数据：
+
+    ```
+    accountId=2230984844 第1次  失败 ConnectError   5.07s   ← 被 5 秒掐断
+    accountId=2230984844 第2次  HTTP 200           7.95s   ← 同一请求其实要 8 秒
+    accountId=2054294369 第1次  HTTP 200           0.16s   ← 连接复用后很快
+    ```
+
+    于是"第一次查询必失败、重试才成功"成了常态；网络再差一点（两次都超 5 秒）
+    整个查询就直接回错误 —— 用户看到的就是"重试后仍失败、没有图"。
+
+    处理：只对命中那个 URL 的 **POST** 请求把超时**提高**到 20 秒（绝不会降低已有超时），
+    其它请求原样透传 —— 上游对 yuyuko 的超时口径本来就是 20 秒，这里只是补齐。
+    （``get_wg_info`` 也是 5 秒，但它是 GET 且有 follow_redirects，不在本包装范围内。）
+
+    :returns: 安装成功（或已安装）返回 ``True``。
+    """
+    if _yuyuko_timeout.get('installed'):
+        return True
+    try:
+        from httpx import AsyncClient as _AsyncClient
+    except Exception:                                            # noqa: BLE001
+        return False
+    original = _AsyncClient.__dict__.get('post')
+    if original is None:
+        return False
+    if getattr(original, '__wows_timeout_guarded__', False):
+        _yuyuko_timeout['installed'] = True
+        return True
+    _yuyuko_timeout['original'] = original
+
+    async def guarded_post(self, url, **kwargs):
+        """``AsyncClient.post`` 的包装版：给上游那两个短超时接口补足时间。"""
+        current = kwargs.get('timeout')
+        if _needs_longer_timeout(url):
+            if isinstance(current, (int, float)) and not isinstance(current, bool):
+                if float(current) < YUYUKO_MIN_TIMEOUT_S:
+                    kwargs['timeout'] = YUYUKO_MIN_TIMEOUT_S
+                    _yuyuko_timeout['bumped'] = _yuyuko_timeout.get('bumped', 0) + 1
+        return await original(self, url, **kwargs)
+
+    guarded_post.__wows_timeout_guarded__ = True
+    try:
+        _AsyncClient.post = guarded_post
+    except Exception:                                            # noqa: BLE001
+        return False
+    _yuyuko_timeout['installed'] = True
+    return True
+
+
+def _needs_longer_timeout(url) -> bool:
+    """判断这个 URL 是否就是上游那个被设成 5 秒的 yuyuko 接口。
+
+    同时要求 **域名** 与 **路径** 都命中：只认路径的话，任何第三方地址只要路径相同
+    也会被改写 —— 我们只想补 yuyuko 那一个。
+
+    :param url: httpx 的 url 参数（可能是 str，也可能是 URL 对象）。
+    :returns: 命中返回 ``True``。
+    """
+    text = str(url or '').lower()
+    if not text:
+        return False
+    return (YUYUKO_HOST_MARKER in text
+            and any(part in text for part in _YUYUKO_SHORT_TIMEOUT_URLS))
+
+
 def _describe_output(hikari) -> str:
     """把 "这次到底出没出图" 压成一小段短文本，供日志使用。
 
@@ -1572,6 +1653,8 @@ async def amain() -> int:
                 apply_config({})
             # 渲染等待兜底：与 hikari-core 配置无关，独立安装（失败也不影响启动）
             install_render_goto_guard()
+            # yuyuko 短超时补时：check_yuyuko_cache 的 5 秒冷启动放不下 TLS 握手
+            install_yuyuko_timeout_guard()
         except Exception as exc:
             logger.error(f"初始化 hikari-core 配置失败：{exc}")
             return 3

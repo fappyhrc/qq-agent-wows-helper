@@ -146,6 +146,7 @@ plugins/wows-helper/
 │   ├── test_template_sync.py   模板清单同步自保层自检（重试 / 降级 / 不吞错）
 │   ├── test_render_guard.py    渲染等待兜底自检（networkidle 超时放过 / DOM 判据）
 │   ├── test_upstream_noise.py  上游超时堆栈降噪自检（抖动不刷屏 / 失败才补打）
+│   ├── test_yuyuko_timeout.py  yuyuko 短超时补时自检（只补那一个接口 / 不降低已有超时）
 │   └── client-test.mjs         客户端契约自检（假桥接，覆盖 6 类响应）
 ├── selfcheck.mjs               本地逻辑自检（68 项）
 ├── e2e-test.mjs                端到端自检（64 项，需起本地 HTTP 假桥接）
@@ -495,6 +496,12 @@ yuyuko 凭据的**主通路是插件设置页**：它让不敲命令行、不配
 **先扣下、成功就不提、真失败才补打**。查询期那处更值得说：上游其实**没有重试**，
 救回查询的是我们自己那层重试，所以那段堆栈既无诊断价值、又会被用户当成"服务坏了"。
 
+**⑪ 上游给某几个接口的超时短得不合理，该补就补。**
+`check_yuyuko_cache` 只给 5 秒，而它每次查询都要发、冷启动要握手 —— 实测同一请求
+第一次 5.07s 被掐断、第二次 7.95s 才成功。桥接层把它补到 20 秒（与上游其它接口一致），
+**只补这一个接口、只提高不降低**（§10.8）。这类"上游参数不合理"的坑，
+与其在上层加重试，不如先把参数补对 —— 重试是兜底，不该是常规路径。
+
 ---
 
 ## 10. 自检与排障
@@ -524,6 +531,9 @@ python plugins/wows-helper/bridge/test_render_guard.py
 
 # 上游超时堆栈降噪自检（9 项：抖动成功后不打堆栈 / 真失败必补打 / 无关 ERROR 不拦）
 python plugins/wows-helper/bridge/test_upstream_noise.py
+
+# yuyuko 短超时补时自检（6 项：只补 cache/check 那一个接口 / 绝不降低已有超时 / 域名判据）
+python plugins/wows-helper/bridge/test_yuyuko_timeout.py
 
 # 提交前扫描：检查是否误纳入凭据或异常大文件
 node plugins/wows-helper/.precommit-scan.mjs
@@ -769,6 +779,32 @@ httpcore.ConnectTimeout: _ssl.c:1064: The handshake operation timed out
 
 > 相关自检：`python bridge/test_upstream_noise.py`（9 项：抖动后成功不打堆栈、
 > 真失败必补打、无关 ERROR 不拦、窗口外不吞）。
+
+### 10.8 上游给 `check_yuyuko_cache` 只留了 5 秒（已补时）
+
+`features/api.py` 里除两处外全是 `timeout=20`，唯独 `api.py:171/186` 的
+`check_yuyuko_cache`（`POST /api/wows/cache/check`）是 **`timeout=5`**。
+而这个请求**每次查询都要发**，且冷启动时还得完成 TLS 握手。本机实测：
+
+```
+accountId=2230984844 第1次  失败 ConnectError   5.07s   ← 被 5 秒掐断
+accountId=2230984844 第2次  HTTP 200           7.95s   ← 同一请求其实要 8 秒
+accountId=2054294369 第1次  HTTP 200           0.16s   ← 连接复用后很快
+```
+
+于是"第一次查询必失败、靠重试救回来"成了常态；网络再差一点（两次都超 5 秒），
+整个查询就直接回错误 —— 用户实际遇到的就是 `重试后取得结果（此前失败 1 次）→ error 无图`。
+
+处理：`install_yuyuko_timeout_guard()` 包装 `httpx.AsyncClient.post`，
+**只对命中「yuyuko 域名 + `/api/wows/cache/check` 路径」且超时值小于 20 秒**的请求补时，
+其它一律原样透传（绝不降低已有超时，也不给未指定超时的请求硬塞一个）。
+
+⚠️ 判据必须**同时**要求域名与路径：只认路径的话，任何第三方地址只要路径相同也会被改写
+（这条是写自检时按"同路径不同域名"的用例才发现并修掉的）。
+（`api.py:202` 的 `get_wg_info` 同为 5 秒，但它是 GET 且有 `follow_redirects`，不在本次范围。）
+
+> 相关自检：`python bridge/test_yuyuko_timeout.py`（6 项 + 判据 4 项：只补那一个接口、
+> 不降低已有超时、未指定时不加、同路径不同域名不碰、幂等）。
 
 ---
 
