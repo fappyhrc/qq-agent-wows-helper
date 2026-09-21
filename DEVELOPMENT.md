@@ -148,15 +148,27 @@ plugins/yuyuko-helper/
 │   ├── test_upstream_noise.py  上游超时堆栈降噪自检（抖动不刷屏 / 失败才补打）
 │   ├── test_yuyuko_timeout.py  yuyuko 短超时补时自检（只补那一个接口 / 不降低已有超时）
 │   └── client-test.mjs         客户端契约自检（假桥接，覆盖 6 类响应）
-├── selfcheck.mjs               本地逻辑自检（68 项）
-├── e2e-test.mjs                端到端自检（64 项，需起本地 HTTP 假桥接）
+├── selfcheck.mjs               本地逻辑自检（87 项）
+├── e2e-test.mjs                端到端自检（80 项，需起本地 HTTP 假桥接）
 ├── 启动桥接服务.bat              双击即用（内部调用 start-bridge.ps1）
-├── push-to-github.ps1          推送到 GitHub（含本机两个环境坑的绕法）
 ├── .precommit-scan.mjs         提交前扫描：凭据 / 异常大文件
 ├── .gitignore / .gitattributes 版本库排除清单与跨平台约定
 ├── README.md                   面向使用者的手册（安装 / 使用 / 配置 / 常见问题）
 └── DEVELOPMENT.md              本文件（开发文档：架构 / 取舍 / 自检 / 排障）
 ```
+
+**命名对照**（三方习惯不同，最容易搞混，先看这张表）：
+
+| 场合 | 用的名字 | 说明 |
+|---|---|---|
+| 仓库 / 部署目录 | `qq-agent-yuyuko-helper`、`plugins/yuyuko-helper/` | 本次改名后的目标形态 |
+| 插件清单 `id` | `wows-helper` | **未改**：设置页里已保存的配置、禁用清单都挂在这个 id 上，改它会让用户配置失效 |
+| 工具名前缀 | `wows-helper__wows-query` | 由插件 `id` 自动拼出（核心逻辑，见 `src/plugin-loader.js`） |
+| 触发词 | `yuyuko` | 只有它；`wws` 不是触发词 |
+| 上游（Hikari-core-v2） | `wws` | 上游自身的帮助页与文档仍这么写，照它把 `wws` 换成 `yuyuko` |
+
+> 也就是说：`wows` 只应出现在**插件 id 与工具名前缀**里，凡是群友看得见的文案
+> 一律是 `yuyuko`，凡是上游输出的原文一律保持 `wws` 不动。
 
 **运行时数据**（均在插件目录内，已被 `.gitignore` 排除，可整体删除后重新生成）：
 
@@ -613,6 +625,8 @@ node plugins/yuyuko-helper/bridge/verify_node.mjs 32941 "账号ID:Token" python
 | 图片服务启动失败 | 端口被占用 | 更换 `imageServerPort`，或关闭 `serveImage`（自动走 file/base64） |
 | 模型重复发送同一张图 | `autoSendImage` 关闭后反复调用工具 | 开启 `autoSendImage`；发送队列本身也会按去重拦截 |
 | 用户回复了数字但没有续查 | 回复中未 @ 机器人 | 让其使用 `@机器人 2`；或关闭 `requireAt` |
+| 设置页里插件显示名变了，但 `data/config.json` 里的键仍是 `wows-helper` | 刻意为之：设置与禁用清单都按插件 `id` 索引，改显示名不动 `id` | 无需处理（见 §3 命名对照） |
+| 提交时 `git diff` 里中文注释整个文件都变了 / 文件不再被识别为 UTF-8 | 用 `Add-Content` 以 ANSI 追加过内容（**本插件真的踩过**：`.gitignore` 末行注释被写成 GBK，整文件因此不是合法 UTF-8） | 用 UTF-8 重写该文件；追加文本请改用 `[System.IO.File]::AppendAllText($p,$s,[Text.Encoding]::UTF8)` 或 `Out-File -Encoding utf8` |
 
 排障时建议先开启插件的 `debug` 开关：日志会记录认领了哪条指令（含判定原因）、
 是否发起查询、耗时以及图片大小。
@@ -850,6 +864,18 @@ accountId=2000000002 第1次  HTTP 200           0.16s   ← 连接复用后很�
   避免写入会提交到 git 的文件。桥接启动后会在工作目录生成
   `data/wows-yuyuko/`（浏览器与船图缓存）与 `checkAdmin.txt`（一次性管理校验串）；
   整个 `data/` 可删除，下次查询会自动重建（代价是重新下载）。
+- **插件 `id` 与目录名暂未跟进改名**。改名只做到"仓库名 + 显示名 + 群友可见文案"，
+  插件清单 `id` 仍是 `wows-helper`、部署目录仍是 `plugins/wows-helper/`。
+  两处之所以没动，是因为它们各自有实际代价：
+
+  | 目标 | 代价 | 结论 |
+  |---|---|---|
+  | `id`: `wows-helper` → `yuyuko-helper` | 设置页已保存的配置、`data/config.json` 里的插件键、禁用清单全部按 id 索引，改 id 等于**用户配置失效需重填**；工具名也会从 `wows-helper__*` 变成 `yuyuko-helper__*` | 暂不改；要改需同步 `plugin.json`、`lib/config.js`、提示词与 3 处测试断言 |
+  | 目录: `plugins/wows-helper/` → `yuyuko-helper/` | 本机 QQ Agent 开着**热重载**：目录一改名会同时看到新旧两个目录，触发重复加载与孤儿工具，必须**先完全退出 QQ Agent 再改** | 暂不改；真要改请先关应用，再同步全仓路径引用 |
+
+  文档与脚本里凡写作 `plugins/yuyuko-helper/` 的，都是**改名后的目标路径**；
+  按当前目录名部署的机器，执行示例前把这段路径替换回 `plugins/wows-helper/` 即可（
+  两者内容完全一致，只有目录名不同）。
 
 ---
 
