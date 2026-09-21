@@ -1,5 +1,5 @@
 @echo off
-rem wows-helper bridge launcher - double-click this file.
+rem yuyuko-helper bridge launcher - double-click this file.
 rem ASCII-only on purpose (cmd.exe renders non-ASCII in .bat files unreliably).
 rem
 rem It runs bridge\start-bridge.ps1 with ExecutionPolicy Bypass:

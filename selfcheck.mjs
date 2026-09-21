@@ -1,5 +1,5 @@
-// wows-helper 自检脚本（不碰网络、不起外部服务，纯本地逻辑）
-// 用法：node plugins/wows-helper/selfcheck.mjs
+// yuyuko-helper 自检脚本（不碰网络、不起外部服务，纯本地逻辑）
+// 用法：node plugins/yuyuko-helper/selfcheck.mjs
 import { readFileSync } from 'node:fs';
 import { matchTrigger, parseSelectIndex, isBotMentioned, extractMentions } from './lib/trigger.js';
 import { buildContextNote, formatResultText, clip } from './lib/format.js';
@@ -137,7 +137,7 @@ const note2 = buildContextNote({
   autoSendImage: false,
   maxChars: 100
 });
-eq(note2.includes('wows-helper__wows-send-image'), true, '关闭自动发图时给出工具名');
+eq(note2.includes('yuyuko-helper__wows-send-image'), true, '关闭自动发图时给出工具名');
 const noteNoData = buildContextNote({
   command: '大和',
   data: { status: 'success', text: '胜率 54.3%', image_base64: 'AAAA' },

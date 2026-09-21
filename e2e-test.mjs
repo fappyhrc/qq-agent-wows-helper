@@ -1,7 +1,7 @@
 // 端到端自检：用假的桥接服务 + 假的 api/ctx 真正跑一遍插件，
 // 验证「钩子注入上下文」与「工具查询并自动发图」两条主链路。
 // 不需要 Python，也不需要 QQ。
-// 用法：node plugins/wows-helper/e2e-test.mjs
+// 用法：node plugins/yuyuko-helper/e2e-test.mjs
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import * as plugin from './index.js';
@@ -130,7 +130,7 @@ await plugin.hooks['before-context']({
 });
 check(entry.text.startsWith(`@${BOT_NICK}(QQ:${BOT_QQ}) wws 大和`), '原话保留在最前（不是替换）');
 check(entry.text.includes('【yuyuko 指令已认领】'), '注入了认领块');
-check(entry.text.includes('wows-helper__wows-query'), '把工具名交给模型');
+check(entry.text.includes('yuyuko-helper__wows-query'), '把工具名交给模型');
 check(entry.text.includes('command="大和"'), '把指令正文交给模型（不带 wws）');
 check(entry.text.includes('QQ:1000000001'), '把发起人写清楚（工具 ctx 里没有这个信息）');
 check(bridgeReqs.length === 0, '默认不预取 → 钩子不发起网络请求');
@@ -238,7 +238,7 @@ check(bridgeReqs.length === reqsBeforeSel, '钩子没有对桥接发任何查询
   `新增 ${bridgeReqs.length - reqsBeforeSel} 条`);
 check(selEntry.text.includes('【yuyuko 多选续查】'), '钩子注入了续查认领提示', selEntry.text);
 check(selEntry.text.includes('selectIndex=2'), '提示里写明 selectIndex=2', selEntry.text);
-check(selEntry.text.includes('wows-helper__wows-query'), '提示里指明该调哪个工具', selEntry.text);
+check(selEntry.text.includes('yuyuko-helper__wows-query'), '提示里指明该调哪个工具', selEntry.text);
 check(selEntry.text.includes('大和改'), '提示里带上该序号对应的选项名', selEntry.text);
 check(selEntry.text.includes('command="wait"'), '提示里带上原始 command（工具需要它才能找到挂起的会话）', selEntry.text);
 // 认领后立刻清掉挂起会话：防止群友同一句"1"被重复认领。

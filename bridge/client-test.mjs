@@ -1,6 +1,6 @@
 // 桥接服务 HTTP 契约测试：用 Node 起一个假的 hikari_bridge.py（同样的响应结构），
 // 验证插件侧的 bridge.js 能正确解析 success / wait / failed / error / 超时 / 口令 六种情况。
-// 用法：node plugins/wows-helper/bridge/client-test.mjs
+// 用法：node plugins/yuyuko-helper/bridge/client-test.mjs
 import http from 'node:http';
 import { bridgeQuery, bridgePing, friendlyBridgeError } from '../lib/bridge.js';
 import { buildContextNote } from '../lib/format.js';

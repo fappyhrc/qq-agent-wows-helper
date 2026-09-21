@@ -1,4 +1,4 @@
-# wows-helper 桥接服务依赖说明
+# yuyuko-helper 桥接服务依赖说明
 #
 # ⚠️ 重要：**不要**直接 `pip install hikari-core`。
 #    PyPI 上那个 hikari-core 是旧项目（pydantic v1 + jinja2 架构），

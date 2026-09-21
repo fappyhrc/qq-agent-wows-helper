@@ -1,5 +1,5 @@
 /**
- * 战舰世界助手（wows-helper）· 插件入口
+ * 战舰世界助手（yuyuko-helper）· 插件入口
  * =====================================
  *
  * 职责
@@ -50,7 +50,7 @@ import { buildContextNote, formatResultText, clip, waitingHint, formatOptions } 
 // 这些都是"当前进程的运行态"，全部带容量/TTL 上限；deactivate 与 dispose 里会清空，
 // 避免禁用后重新启用还拿着过期数据，也避免长时间运行导致内存增长。
 
-/** 日志出口，由 `setup(api)` 注入（带 `[skill:wows-helper]` 前缀）。 */
+/** 日志出口，由 `setup(api)` 注入（带 `[skill:yuyuko-helper]` 前缀）。 */
 let log = () => {};
 let warn = () => {};
 
@@ -315,7 +315,7 @@ async function probeBridge() {
  * 注册本插件的 2 个工具。
  *
  * 工具是模型唯一能主动发起查询/发图的入口 —— 能力（providers）对模型完全不可见。
- * 工具 id 只写短名，核心会加 `wows-helper__` 前缀（双下划线），
+ * 工具 id 只写短名，核心会加 `yuyuko-helper__` 前缀（双下划线），
  * 且只允许 `[a-zA-Z0-9_-]`：带 `:` 或 `.` 会被严格端点以 400 拒掉整个请求。
  *
  * @param {object} api 核心注入的 Skill API。
@@ -895,7 +895,7 @@ export const hooks = {
         note = '【yuyuko 指令已认领】\n'
           + `发起人：${String(entry?.senderName ?? entry?.senderId ?? '群友')}（QQ:${entry?.senderId ?? '?'}）\n`
           + `指令：yuyuko ${cmd}\n`
-          + `请立刻调用 wows-helper__wows-query 工具执行它（command="${cmd}"，不要带 yuyuko 前缀），`
+          + `请立刻调用 yuyuko-helper__wows-query 工具执行它（command="${cmd}"，不要带 yuyuko 前缀），`
           + '查到数据/出图后再接话。这个工具会真实查询并自动把渲染图发到群里，通常几秒。\n'
           + '在工具返回之前，不要凭印象说任何战绩数字。';
       }
@@ -944,7 +944,7 @@ export const hooks = {
         + `发起人：${String(entry?.senderName ?? senderId ?? '群友')}（QQ:${senderId}）\n`
         + `该群友回复的是序号 ${idx}，对应：${clip(String(label), 80)}\n`
         + `待选项：\n${formatOptions(pend.options)}\n`
-        + `请立刻调用 wows-helper__wows-query 工具执行这次续查：`
+        + `请立刻调用 yuyuko-helper__wows-query 工具执行这次续查：`
         + `command="${pend.command || ''}"、selectIndex=${idx}。\n`
         + '这个工具会真实查询并自动把渲染图发到群里，通常几秒；'
         + '在它返回之前，不要凭印象说这条船的数据或结果。';

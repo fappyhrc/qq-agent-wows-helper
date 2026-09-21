@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""wows-helper · Hikari-core-v2 桥接服务。
+"""yuyuko-helper · Hikari-core-v2 桥接服务。
 
 把 Python 侧的 Hikari-core-v2（指令解析 → yuyuko API 查询 → 浏览器端模板渲染出图）
-包装成一个仅监听本机的 JSON HTTP 服务，供 QQ Agent 的 wows-helper 插件调用。
+包装成一个仅监听本机的 JSON HTTP 服务，供 QQ Agent 的 yuyuko-helper 插件调用。
 
 设计动因
 --------
@@ -123,7 +123,7 @@ def parse_args(argv=None):
     :param argv: 参数列表；``None`` 表示取 ``sys.argv[1:]``（便于测试注入）。
     :returns: ``argparse.Namespace``。
     """
-    p = argparse.ArgumentParser(description="wows-helper 的 Hikari-core-v2 桥接服务")
+    p = argparse.ArgumentParser(description="yuyuko-helper 的 Hikari-core-v2 桥接服务")
     p.add_argument("--host", default=os.environ.get("WOWS_HELPER_BRIDGE_HOST", "127.0.0.1"),
                    help="监听地址，默认 127.0.0.1（仅本机）")
     p.add_argument("--port", type=int, default=int(os.environ.get("WOWS_HELPER_BRIDGE_PORT", "8788")),
@@ -1661,7 +1661,7 @@ async def amain() -> int:
 
     server = await asyncio.start_server(Handler(), host=ARGS.host, port=ARGS.port)
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets or [])
-    logger.info(f"wows-helper 桥接服务已启动：http://{ARGS.host}:{ARGS.port} （{addrs}）")
+    logger.info(f"yuyuko-helper 桥接服务已启动：http://{ARGS.host}:{ARGS.port} （{addrs}）")
     # 启动横幅直接把"插件侧还要配什么"讲清楚：这是首次部署最常见的卡点
     logger.info("请在 QQ Agent 的『插件 → 战舰世界助手』设置里确认：")
     logger.info("   · 桥接服务地址 = http://127.0.0.1:%d" % ARGS.port)

@@ -82,7 +82,7 @@ before-context 钩子（确定性，微秒级，默认不发网络请求）
   ③ 把「【yuyuko 指令已认领】发起人 + 指令 + 该调哪个工具」追加到该条消息
         │
         ▼
-模型读到认领块 → 调用 wows-helper__wows-query 工具（工具名里的 `wows-helper` 是插件 id 前缀，见 §3）
+模型读到认领块 → 调用 yuyuko-helper__wows-query 工具（前缀是插件 id，短名保留 `wows-`，见 §3）
         │
         ▼
 bridge/hikari_bridge.py（本地常驻，独立进程）
@@ -157,18 +157,23 @@ plugins/yuyuko-helper/
 └── DEVELOPMENT.md              本文件（开发文档：架构 / 取舍 / 自检 / 排障）
 ```
 
-**命名对照**（三方习惯不同，最容易搞混，先看这张表）：
+**命名对照**（四方习惯不同，最容易搞混，先看这张表）：
 
 | 场合 | 用的名字 | 说明 |
 |---|---|---|
-| 仓库 / 部署目录 | `qq-agent-yuyuko-helper`、`plugins/yuyuko-helper/` | 本次改名后的目标形态 |
-| 插件清单 `id` | `wows-helper` | **未改**：设置页里已保存的配置、禁用清单都挂在这个 id 上，改它会让用户配置失效 |
-| 工具名前缀 | `wows-helper__wows-query` | 由插件 `id` 自动拼出（核心逻辑，见 `src/plugin-loader.js`） |
+| 仓库名 | `qq-agent-yuyuko-helper` | GitHub 仓库（旧名 `qq-agent-wows-helper`，GitHub 侧自动重定向） |
+| 部署目录 | `plugins/yuyuko-helper/` | 与仓库名对齐 |
+| 插件清单 `id` | `yuyuko-helper` | 设置页配置、`data/config.json` 的键、禁用清单都按它索引 |
+| 工具名前缀 | `yuyuko-helper__wows-query`、`yuyuko-helper__wows-send-image` | 前缀由插件 `id` 拼出（核心逻辑见 `src/plugin-loader.js`）；**短名保留 `wows-`**：工具语义确实是"查 World of Warships" |
+| 提示词片段 id | `yuyuko-helper-rules` | 同上，随 `id` 走 |
 | 触发词 | `yuyuko` | 只有它；`wws` 不是触发词 |
 | 上游（Hikari-core-v2） | `wws` | 上游自身的帮助页与文档仍这么写，照它把 `wws` 换成 `yuyuko` |
 
-> 也就是说：`wows` 只应出现在**插件 id 与工具名前缀**里，凡是群友看得见的文案
-> 一律是 `yuyuko`，凡是上游输出的原文一律保持 `wws` 不动。
+> 一句话记法：**群友看得见的一律 `yuyuko`；工具短名与上游原文保留 `wows`/`wws`。**
+>
+> ⚠️ 本次把 `id` 从 `wows-helper` 改成了 `yuyuko-helper`，这属于**破坏性变更**：
+> 旧 id 下的设置不会自动跟过来。本机已顺带把 `data/config.json` 里的键手工迁移
+> （见 §4.5），别人的机器需要重填一次「yuyuko API 凭据」并重新开启插件。
 
 **运行时数据**（均在插件目录内，已被 `.gitignore` 排除，可整体删除后重新生成）：
 
@@ -288,7 +293,37 @@ powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1 `
 > 密文字段在界面上显示为 `******`；**留空提交 = 不修改**，不会覆盖已有值。
 > 凭据仅存在于本机 `data/config.json`，在每次查询时下发给桥接服务，填完无需重启。
 
-### 4.5 部署自查
+### 4.5 从旧 id 迁移配置（只在改过 `id` 时需要，做一次即可）
+
+插件 `id` 从 `wows-helper` 改为 `yuyuko-helper` 后，旧设置不会自动跟过来：
+不迁移的表现是"插件显示已启用，但每次查询都提示没配凭据"。
+
+**先关掉 QQ Agent**（改配置时它会回写 `data/config.json`，边改边写容易互相覆盖），
+然后编辑 `data/config.json`，把 `plugins` 下这个键**只改键名、整块值原样保留**：
+
+```jsonc
+{
+  "plugins": {
+    "yuyuko-helper": {          // ← 原来是 "wows-helper"，值一个字都不用动
+      "enabled": true,
+      "yuyukoToken": "账号ID:Token",
+      "...": "其余调优项照旧"
+    }
+  }
+}
+```
+
+也可以用一条命令做（先备份，再解析 JSON 校验，避免手改漏了逗号）：
+
+```powershell
+$p = 'data/config.json'
+Copy-Item $p "$p.bak" -Force
+node -e "const fs=require('fs');const f=process.argv[1];const j=JSON.parse(fs.readFileSync(f,'utf8'));const P=j.plugins||j.skills;if(P['wows-helper']&&!P['yuyuko-helper']){P['yuyuko-helper']=P['wows-helper'];delete P['wows-helper'];fs.writeFileSync(f,JSON.stringify(j,null,2));console.log('已迁移');}else{console.log('无需迁移或已迁移');}" $p
+```
+
+迁移后 `data/config.json` 里不应再有 `wows-helper` 这个键。
+
+### 4.6 部署自查
 
 ```bash
 curl http://127.0.0.1:8788/health
@@ -625,7 +660,7 @@ node plugins/yuyuko-helper/bridge/verify_node.mjs 32941 "账号ID:Token" python
 | 图片服务启动失败 | 端口被占用 | 更换 `imageServerPort`，或关闭 `serveImage`（自动走 file/base64） |
 | 模型重复发送同一张图 | `autoSendImage` 关闭后反复调用工具 | 开启 `autoSendImage`；发送队列本身也会按去重拦截 |
 | 用户回复了数字但没有续查 | 回复中未 @ 机器人 | 让其使用 `@机器人 2`；或关闭 `requireAt` |
-| 设置页里插件显示名变了，但 `data/config.json` 里的键仍是 `wows-helper` | 刻意为之：设置与禁用清单都按插件 `id` 索引，改显示名不动 `id` | 无需处理（见 §3 命名对照） |
+| 改名后插件显示"已启用"，但每次查询提示"还没有配置 yuyuko API 凭据" | 插件 `id` 从 `wows-helper` 改成了 `yuyuko-helper`，而 `data/config.json` 里仍是旧键，配置等于空的 | 把该键改名为 `yuyuko-helper`（整块值保留），或用设置页重填凭据；见 §3 命名对照 |
 | 提交时 `git diff` 里中文注释整个文件都变了 / 文件不再被识别为 UTF-8 | 用 `Add-Content` 以 ANSI 追加过内容（**本插件真的踩过**：`.gitignore` 末行注释被写成 GBK，整文件因此不是合法 UTF-8） | 用 UTF-8 重写该文件；追加文本请改用 `[System.IO.File]::AppendAllText($p,$s,[Text.Encoding]::UTF8)` 或 `Out-File -Encoding utf8` |
 
 排障时建议先开启插件的 `debug` 开关：日志会记录认领了哪条指令（含判定原因）、
@@ -864,18 +899,19 @@ accountId=2000000002 第1次  HTTP 200           0.16s   ← 连接复用后很�
   避免写入会提交到 git 的文件。桥接启动后会在工作目录生成
   `data/wows-yuyuko/`（浏览器与船图缓存）与 `checkAdmin.txt`（一次性管理校验串）；
   整个 `data/` 可删除，下次查询会自动重建（代价是重新下载）。
-- **插件 `id` 与目录名暂未跟进改名**。改名只做到"仓库名 + 显示名 + 群友可见文案"，
-  插件清单 `id` 仍是 `wows-helper`、部署目录仍是 `plugins/wows-helper/`。
-  两处之所以没动，是因为它们各自有实际代价：
+- **插件 `id` 已改，属破坏性变更**。`wows-helper` → `yuyuko-helper`（目录同步改为
+  `plugins/yuyuko-helper/`），于是：
 
-  | 目标 | 代价 | 结论 |
-  |---|---|---|
-  | `id`: `wows-helper` → `yuyuko-helper` | 设置页已保存的配置、`data/config.json` 里的插件键、禁用清单全部按 id 索引，改 id 等于**用户配置失效需重填**；工具名也会从 `wows-helper__*` 变成 `yuyuko-helper__*` | 暂不改；要改需同步 `plugin.json`、`lib/config.js`、提示词与 3 处测试断言 |
-  | 目录: `plugins/wows-helper/` → `yuyuko-helper/` | 本机 QQ Agent 开着**热重载**：目录一改名会同时看到新旧两个目录，触发重复加载与孤儿工具，必须**先完全退出 QQ Agent 再改** | 暂不改；真要改请先关应用，再同步全仓路径引用 |
+  | 受影响的东西 | 变化 |
+  |---|---|
+  | 设置页配置 / `data/config.json` 的键 | 从 `"wows-helper"` 变为 `"yuyuko-helper"`；**旧键不会自动迁移**，不迁移就等于凭据、`enabled`、全部调优项丢失 |
+  | 工具名 | `wows-helper__wows-query` → `yuyuko-helper__wows-query`（发送工具同理）；短名 `wows-query` / `wows-send-image` 不变 |
+  | 提示词片段 id | `wows-helper-rules` → `yuyuko-helper-rules` |
+  | 日志前缀 | `[skill:wows-helper]` → `[skill:yuyuko-helper]` |
 
-  文档与脚本里凡写作 `plugins/yuyuko-helper/` 的，都是**改名后的目标路径**；
-  按当前目录名部署的机器，执行示例前把这段路径替换回 `plugins/wows-helper/` 即可（
-  两者内容完全一致，只有目录名不同）。
+  迁移办法（本机已执行，见 §4.5）：把 `data/config.json` 里 `plugins` 下的
+  `"wows-helper"` 这个键**只改键名、整块值原样保留**即可，凭据不用重填。
+  别人的机器若没迁移，表现为"插件显示已开启但每次查询都说没配凭据"。
 
 ---
 
