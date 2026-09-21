@@ -2,8 +2,8 @@
 //
 // 用途：首次发布本插件时建一个私有仓库。之后不需要再用。
 //   set GH_API_TOKEN=<你的 token>
-//   node bridge/create-repo.mjs fappyhrc/qq-agent-yuyuko-helper          # 私有（默认）
-//   node bridge/create-repo.mjs fappyhrc/qq-agent-yuyuko-helper --public # 公开
+//   node bridge/create-repo.mjs <你的用户名>/qq-agent-yuyuko-helper          # 私有（默认）
+//   node bridge/create-repo.mjs <你的用户名>/qq-agent-yuyuko-helper --public # 公开
 //
 // token 只从环境变量读取：不落盘、不打印、不进日志。
 // token 至少需要 repo 权限（细粒度 token 请勾 "Administration: Read and write"）。
