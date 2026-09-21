@@ -178,6 +178,59 @@ def _error_suppressor(record) -> bool:
     return not (_suppress_errors and record['level'].no >= 40)
 
 
+# ── 上游 yuyuko 超时堆栈的降噪 ──────────────────────────────────────────────
+# 上游 `core/http_error_handler.py` 第 108-113 行：**任何** TimeoutError/ConnectTimeout
+# 都会先 `logger.warning(traceback.format_exc())` 打一整段堆栈，然后返回
+# `hikari.error('请求超时了…')`。而这两种文案正是我们自动重试的标记 ——
+# 也就是说：一次 TLS 握手抖动 = 一段吓人的堆栈 + 一次成功的重试。
+#
+# 实测（本机到 v3-api.wows.shinoaki.com 的 POST /api/wows/cache/check）：
+#   httpx.ConnectTimeout: _ssl.c:1064: The handshake operation timed out
+#   → httpx → httpcore 四处转发 → 最后被 http_error_handler 兜住
+#
+# 策略与模板同步一致：**抑制 → 成功就不提，真失败才补打全栈**。
+# ⚠️ 判据必须是**网络/传输类特征**，而不是"请求超时了"这种**结果文案** ——
+#    实测踩过：上游打出来的那段是 `logger.warning(traceback.format_exc())`，
+#    文本里只有 `httpx.ConnectTimeout` / `handshake operation timed out`，
+#    根本没有 `请求超时了`（那是它随后返回给调用方的 error 文案）。
+#    按结果文案匹配 → 永远匹配不上 → 降噪完全失效。
+_TRANSPORT_TRACE_MARKERS = (
+    'ConnectTimeout', 'ConnectError', 'ReadTimeout', 'WriteTimeout',
+    'PoolTimeout', 'RemoteProtocolError', 'handshake operation timed out',
+    'timed out', 'Connection reset',
+)
+# 另有少数路径直接记一句结果文案（不含 traceback），也一并收下
+_UPSTREAM_TIMEOUT_TEXTS = (
+    '请求超时了',          # handle_yuyuko_errors 的 timeout_message
+    '连接池异常',          # PoolTimeout 分支
+    'wuwuwu出了点问题',    # 兜底 except 的 exception_message
+)
+_yuyuko_noise = {'capture': None}
+
+
+def _yuyuko_timeout_filter(record) -> bool:
+    """loguru 过滤器：捕获窗口内把上游的超时堆栈收进缓冲区，不让它打出去。
+
+    只认"带 Traceback 且含网络/传输类异常类型"的记录，或那几句固定的超时文案；
+    其它 WARNING/ERROR 一律放行，绝不吞掉真正的报错。
+
+    :param record: loguru 记录。
+    :returns: ``False`` 表示丢弃该记录（已收进缓冲区）。
+    """
+    buf = _yuyuko_noise.get('capture')
+    if buf is None or record['level'].no < 30:      # 只关心 WARNING 及以上
+        return True
+    message = str(record['message'] or '')
+    hit = any(text in message for text in _UPSTREAM_TIMEOUT_TEXTS)
+    if not hit and 'Traceback' in message:
+        low = message.lower()
+        hit = any(marker.lower() in low for marker in _TRANSPORT_TRACE_MARKERS)
+    if hit:
+        buf.append(message)
+        return False
+    return True
+
+
 try:
     from loguru import logger
 
@@ -189,7 +242,9 @@ try:
     #    详见 _collect_loguru_messages。
     logger.add(sys.stdout, level=ARGS.log_level,
                format="<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | {message}",
-               filter=_error_suppressor)
+               # 两个过滤器串起来：模板同步期间丢 ERROR；查询期间把上游的超时堆栈
+               # 收进缓冲区（成功就不提、真失败才补打），详见各自的 docstring。
+               filter=lambda r: _error_suppressor(r) and _yuyuko_timeout_filter(r))
 except Exception:  # pragma: no cover - loguru 随 hikari-core 一起安装，正常不会走到
     import logging
 
@@ -1188,23 +1243,42 @@ async def init_hikari_with_retry(*, platform: str, platform_id: str, bot_id: str
     :side effect: 重试之间 ``await asyncio.sleep``（不阻塞事件循环，其他会话仍可查询）。
     """
     notes: list[str] = []
+    final_noise: list[str] = []
     for i in range(max(1, attempts + 1)):
-        hikari = await init_hikari(
-            platform=platform,
-            PlatformId=str(platform_id),
-            BotId=str(bot_id),
-            command_text=str(command),
-            GroupId=(str(group_id) if group_id not in (None, "") else None),
-            # 禁用清单（可选）。必须传**函数对象**，传字符串无效 —— 见 resolve_ignore_list
-            Ignore_List=ACTIVE_IGNORE or None,
-        )
+        # 每次尝试开始时开一个捕获窗口：上游在超时时会打一段 traceback，
+        # 先扣下来 —— 若这次或后续重试成功，那段堆栈对用户毫无价值；
+        # 只有当最终结果确实是失败时，才把它补打出来（见下面 return 前）。
+        noise: list[str] = []
+        _yuyuko_noise['capture'] = noise
+        try:
+            hikari = await init_hikari(
+                platform=platform,
+                PlatformId=str(platform_id),
+                BotId=str(bot_id),
+                command_text=str(command),
+                GroupId=(str(group_id) if group_id not in (None, "") else None),
+                # 禁用清单（可选）。必须传**函数对象**，传字符串无效 —— 见 resolve_ignore_list
+                Ignore_List=ACTIVE_IGNORE or None,
+            )
+        finally:
+            _yuyuko_noise['capture'] = None
         payload = package(hikari, command, 0)
         if i < attempts and is_render_failure(payload):
             reason = str(payload.get('text') or '').splitlines()[0][:160]
             notes.append(reason)
-            logger.warning(f"渲染失败，准备重试（{i + 1}/{attempts}）：{reason}")
+            logger.warning(f"网络/渲染抖动，准备重试（{i + 1}/{attempts}）：{reason}")
+            final_noise = noise          # 留着：万一后面重试也失败，这些堆栈仍有价值
             await asyncio.sleep(max(0, delay_ms) / 1000)
             continue
+        if str(payload.get('status')) in ('success', 'wait'):
+            if noise or final_noise:
+                # 重试成功：把"抖动过"这件事压成一行，不把整段堆栈丢给用户
+                logger.info(f"上游超时已自愈（共出现 {len(noise) + len(final_noise)} 次网络异常，"
+                            f"重试后成功），堆栈未打印")
+            return hikari, notes
+        # 真的失败了：上游那段堆栈此刻才有诊断价值，补打出来
+        for text in noise + final_noise:
+            logger.warning(str(text).rstrip('\n'))
         return hikari, notes
     return hikari, notes  # pragma: no cover - 循环必然在内部 return
 

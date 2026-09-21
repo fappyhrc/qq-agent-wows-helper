@@ -145,6 +145,7 @@ plugins/wows-helper/
 │   ├── test_render_retry.py    渲染失败识别与自动重试自检
 │   ├── test_template_sync.py   模板清单同步自保层自检（重试 / 降级 / 不吞错）
 │   ├── test_render_guard.py    渲染等待兜底自检（networkidle 超时放过 / DOM 判据）
+│   ├── test_upstream_noise.py  上游超时堆栈降噪自检（抖动不刷屏 / 失败才补打）
 │   └── client-test.mjs         客户端契约自检（假桥接，覆盖 6 类响应）
 ├── selfcheck.mjs               本地逻辑自检（68 项）
 ├── e2e-test.mjs                端到端自检（64 项，需起本地 HTTP 假桥接）
@@ -488,6 +489,12 @@ yuyuko 凭据的**主通路是插件设置页**：它让不敲命令行、不配
 配套把提示词第 3 条改成"提醒群友 **@机器人** 后回序号" —— 旧文案写的是"直接回数字即可"，
 与认领规则（不 @ 不认）自相矛盾，群友照做就认不上。详见 §5 的「多选续查」。
 
+**⑩ 瞬时网络故障不许在日志里泼堆栈（启动期与查询期各一处）。**
+上游有两处把"无关痛痒的网络抖动"用 `logger.warning/error(traceback.format_exc())` 汇报：
+启动期的模板清单检查（§10.6）、查询期的 yuyuko 超时（§10.7）。两处的处理原则相同 ——
+**先扣下、成功就不提、真失败才补打**。查询期那处更值得说：上游其实**没有重试**，
+救回查询的是我们自己那层重试，所以那段堆栈既无诊断价值、又会被用户当成"服务坏了"。
+
 ---
 
 ## 10. 自检与排障
@@ -514,6 +521,9 @@ python plugins/wows-helper/bridge/test_template_sync.py
 
 # 渲染等待兜底自检（23 项：networkidle 超时放过 / 背景图跟踪 / DOM 空仍失败 / 防叠加）
 python plugins/wows-helper/bridge/test_render_guard.py
+
+# 上游超时堆栈降噪自检（9 项：抖动成功后不打堆栈 / 真失败必补打 / 无关 ERROR 不拦）
+python plugins/wows-helper/bridge/test_upstream_noise.py
 
 # 提交前扫描：检查是否误纳入凭据或异常大文件
 node plugins/wows-helper/.precommit-scan.mjs
@@ -680,6 +690,8 @@ playwright._impl._errors.TimeoutError: Page.goto: Timeout 10000ms exceeded.
 | `INFO 管理员校验串已生成（请私信发送给机器人）：…` | 上游生成的随机串，用于鉴权指令 | 需要管理功能时才理会 |
 | `ERROR 初始化 hikari-core 配置失败: 'NoneType' object is not iterable` | **网络完全不通**且缓存也取不到时上游的崩溃点 | **必须看**：检查代理/网络后重启 |
 | `INFO 页面 networkidle 未在 2000ms 内达成（外部图标资源偏慢），已确认页面本身加载完成，继续渲染（3.6s）` | 外部图标资源慢，但页面本身正常，已直接继续渲染 | **可忽略**，见 §10.5 |
+| `WARNING 网络/渲染抖动，准备重试（1/1）：请求超时了…` + `INFO 上游超时已自愈（共出现 N 次网络异常，重试后成功），堆栈未打印` | yuyuko 接口或渲染抖了一下，已自动重试成功；上游那段超时 traceback 被扣下没打 | **可忽略**，见 §10.7 |
+| 同上，但**没有**"已自愈"行，而是补打出大段 `Traceback` | 重试也没成功 | **必须看**：堆栈是"失败才补打"的，出现即代表这次真的没救回来 |
 | `ERROR` + `Traceback` 里含 `update_template` | 模板同步出现**确定性**故障（清单为空、磁盘写入失败等） | **必须看**：这类不会降级，会原样打印 |
 | `ERROR` + `Traceback` 里含 `Page.goto` / `playwright` | 渲染阶段失败 | 见 §10.4（已自动重试一次） |
 | `INFO 查询「…」→ success (…ms) 图=208KB tpl=wws-ship-v6.html` | 正常结果行 | **注意结尾的"图=…/无图(…)"**：`status=success` **不代表有图**，上游可能因 `Output.Template` 为空而跳过渲染。早期日志只打 status，"success 但没图"与"success 且有图"长得一模一样 |
@@ -713,6 +725,50 @@ WARNING；个别模板文件下载失败、清单为空、磁盘错误等一律�
 
 > 相关自检：`python bridge/test_template_sync.py`（46 项，含"上游那次调用也被接管"
 > 与"确定性故障必须保留 ERROR"两条关键约束）。
+
+### 10.7 查询路径的同一类噪音：yuyuko 超时堆栈
+
+§10.6 讲的是**启动期**的模板清单噪音。查询期还有一处同源问题，来自
+`core/http_error_handler.py` 第 106-113 行：
+
+```python
+except (TimeoutError, ConnectTimeout):
+    logger.warning(traceback.format_exc())      # 先打一整段堆栈
+    hikari = _get_hikari(func, args, kwargs)
+    if hikari is not None:
+        return hikari.error(timeout_message)    # 再返回"请求超时了…"
+```
+
+也就是：**一次 TLS 握手抖动 = 一段看起来像崩溃的堆栈 + 一次成功的重试**。
+实测日志（本机到 `v3-api.wows.shinoaki.com` 的 `POST /api/wows/cache/check`）：
+
+```
+WARNING | Traceback (most recent call last):
+  File ".../httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+  ...
+httpcore.ConnectTimeout: _ssl.c:1064: The handshake operation timed out
+```
+
+好在它返回的那几种文案（`请求超时了` / `连接池异常` / `wuwuwu出了点问题`）**正是我们
+自动重试的标记**，所以查询本身会自动救回来 —— 需要处理的只是那段堆栈。
+
+做法与模板同步一致：**抑制 → 成功就不提，真失败才补打**。
+
+| 环节 | 实现 |
+|---|---|
+| 抑制 | `_yuyuko_timeout_filter` 收进 `_yuyuko_noise['capture']` 缓冲区，不让它落到 sink |
+| 窗口 | `init_hikari_with_retry` 每次尝试包一层窗口（`try/finally` 复位） |
+| 成功 | 打印一行 `INFO 上游超时已自愈（共出现 N 次网络异常，重试后成功），堆栈未打印`，**不补堆栈** |
+| 失败 | `logger.warning(原堆栈)` 补打出来 —— 此时它才有诊断价值 |
+
+⚠️ **判据必须用"网络/传输类特征"，不能用结果文案**。实测踩过：上游打出来的是
+`logger.warning(traceback.format_exc())`，文本里只有 `httpx.ConnectTimeout` 与
+`handshake operation timed out`，**根本没有** `请求超时了`（那是随后返回给调用方的 error 文案）。
+第一版按结果文案匹配 → 永远匹配不上 → 降噪完全失效，而单元测试里我把样例堆栈"简化"了，
+恰好掩盖了这个缺陷。所以 `test_upstream_noise.py` 里的样例堆栈是**照抄实测截图**的。
+
+> 相关自检：`python bridge/test_upstream_noise.py`（9 项：抖动后成功不打堆栈、
+> 真失败必补打、无关 ERROR 不拦、窗口外不吞）。
 
 ---
 
