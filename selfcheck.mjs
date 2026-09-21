@@ -37,7 +37,10 @@ eq(isBotMentioned('@老八(QQ:1) wws 大和', BOT.selfNames), true, '名字不�
 eq(isBotMentioned('@老八(QQ:1234) wws 大和', ['机器人', '1']), false, '号码含 1 不算命中');
 eq(isBotMentioned('[CQ:at,qq=1] wws 大和', ['机器人', '1']), true, 'CQ 码兜底');
 
-console.log('— 触发判定：@ + wws 两个条件（AND）—');
+console.log('— 触发判定机制：@ + 触发词两个条件（AND）—');
+// ⚠️ 这一组**故意显式传 ['wws']**：它测的是"匹配机制"本身（@ 判定、取指令、大小写、
+//    空白、冒号、引用块……），用哪个词无关紧要。**默认触发词是 yuyuko**，
+//    与线上一致的那组断言在下面单独列。别把这里的 wws 当成"还支持 wws"。
 eq(matchTrigger('@机器人(QQ:1) wws 大和', ['wws'], BOT).matched, true, '@机器人 + wws → 认领');
 eq(matchTrigger('@机器人(QQ:1) wws 大和', ['wws'], BOT).command, '大和', '提取指令正文');
 eq(matchTrigger('@机器人(QQ:1) wws 单船 大和 recent 30', ['wws'], BOT).command, '单船 大和 recent 30', '多词指令');
@@ -56,24 +59,31 @@ eq(matchTrigger('wws 大和', ['wws'], { requireAt: false, selfNames: [] }).matc
 eq(matchTrigger('[引用 某人：wws 大和]', ['wws'], { requireAt: false }).matched, false, '引用块不误触发');
 eq(matchTrigger('@机器人(QQ:1) wws 大和', ['wws', '@wws'], BOT).matched, true, '多触发词配置');
 
-console.log('— 触发词：yuyuko 为主，且"后面的内容"原样转发给上游 —');
-// 用户要求：严格 @ 机器人 + 出现 yuyuko，然后把 yuyuko 之后的内容交给 Hikari-core-v2。
+console.log('— 触发词：只认 yuyuko（核验后的结论），后面的内容原样转发给上游 —');
+// 用户核验后确定：只保留 yuyuko 一个触发词（wws 不再算数）。
 // 这里用的就是**线上真实默认值**（从 lib/config.js 取），避免测试与配置漂移。
 const KW = DEFAULT_KEYWORDS;
-eq(Array.isArray(KW) && KW.includes('yuyuko'), true, '默认触发词含 yuyuko', JSON.stringify(KW));
-eq(KW.includes('wws'), true, 'wws 仍保留（上游帮助页与官方机器人用的就是它）', JSON.stringify(KW));
-eq(matchTrigger('@机器人(QQ:1) yuyuko ship 大和', KW, BOT).matched, true, '@机器人 + yuyuko → 认领');
-eq(matchTrigger('@机器人(QQ:1) yuyuko ship 大和', KW, BOT).command, 'ship 大和', 'yuyuko 之后的内容原样作指令');
+eq(Array.isArray(KW) && KW.length === 1 && KW[0] === 'yuyuko', true,
+  '默认触发词只有 yuyuko', JSON.stringify(KW));
+eq(matchTrigger('@机器人(QQ:1) yuyuko me', KW, BOT).matched, true, '@机器人 + yuyuko → 认领');
+eq(matchTrigger('@机器人(QQ:1) yuyuko me', KW, BOT).command, 'me', 'yuyuko 之后的内容原样作指令（查总水表）');
+eq(matchTrigger('@机器人(QQ:1) yuyuko ship 大和 recent 30', KW, BOT).command, 'ship 大和 recent 30', '多词指令完整保留');
 eq(matchTrigger('@机器人(QQ:1) yuyuko   recent 7', KW, BOT).command, 'recent 7', '多余空白被规整');
 eq(matchTrigger('@机器人(QQ:1) Yuyuko 大和', KW, BOT).command, '大和', '大小写不敏感');
 eq(matchTrigger('@机器人(QQ:1) yuyuko：大和', KW, BOT).command, '大和', '中文冒号分隔');
 eq(matchTrigger('@机器人(QQ:1) yuyuko', KW, BOT).command, '', '只有触发词 → 空指令（走帮助）');
-eq(matchTrigger('yuyuko ship 大和', KW, BOT).matched, false, '没 @ 机器人 → 严格不认领');
-eq(matchTrigger('yuyuko ship 大和', KW, BOT).reason, '没有 @ 机器人', '给出"没 @ 机器人"的原因');
-eq(matchTrigger('@老八(QQ:123) yuyuko ship 大和', KW, BOT).matched, false, '@ 的是别人 → 不认领');
+eq(matchTrigger('yuyuko me', KW, BOT).matched, false, '没 @ 机器人 → 严格不认领');
+eq(matchTrigger('yuyuko me', KW, BOT).reason, '没有 @ 机器人', '给出"没 @ 机器人"的原因');
+eq(matchTrigger('@老八(QQ:123) yuyuko me', KW, BOT).matched, false, '@ 的是别人 → 不认领');
 eq(matchTrigger('@机器人(QQ:1) 用 yuyuko 查一下', KW, BOT).matched, false, '触发词不在最前 → 不认领（宁可不触发）');
-eq(matchTrigger('@机器人(QQ:1) wws 大和', KW, BOT).command, '大和', '旧触发词 wws 仍然可用');
-eq(matchTrigger('@机器人(QQ:1) @yuyuko 大和', KW, BOT).command, '大和', '@yuyuko 直接叫触发词');
+// ⚠️ wws 已摘掉：老文案照抄会失效，必须有断言把它钉死，否则改回去没人发现
+eq(matchTrigger('@机器人(QQ:1) wws me', KW, BOT).matched, false, 'wws 不再是触发词（核验后只留 yuyuko）');
+eq(matchTrigger('@机器人(QQ:1) @wws me', KW, BOT).matched, false, '@wws 不再是触发词');
+// 反之，把触发词连 @ 一起打出来（"直接 @ 叫 yuyuko 这个名字"）仍然认领 ——
+// 这是 lib/trigger.js 里 reused 分支的**既有设计**，不是 wws 的残留：
+// 最后一个 @提及 的名字恰好等于触发词时，把它当成头部、后面的照常作指令。
+eq(matchTrigger('@机器人(QQ:1) @yuyuko me', KW, BOT).matched, true, '@机器人 之后再 @yuyuko 仍认领（既有设计）');
+eq(matchTrigger('@机器人(QQ:1) @yuyuko me', KW, BOT).command, 'me', '此时指令仍是 me');
 
 console.log('— 默认值一致性：lib/config.js 与 plugin.json 必须相同 —');
 // 两处各写一份默认值，历史上漂移过（plugin.json 改了、config.js 没改），

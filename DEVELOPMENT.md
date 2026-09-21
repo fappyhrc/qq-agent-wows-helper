@@ -4,7 +4,7 @@
 > 请看面向使用者的 [`README.md`](README.md)。
 >
 > **QQ Agent 插件** · 仓库 <https://github.com/fappyhrc/qq-agent-wows-helper>（私有）
-> 群里发 `@机器人 yuyuko ship 大和`（`wws` 等价），机器人把 Hikari-core-v2 查到的战绩
+> 群里发 `@机器人 yuyuko ship 大和`，机器人把 Hikari-core-v2 查到的战绩
 > **渲染成图片发出来**，并把真实数据交给 AI，由 AI 用群里的语气接一句人话。
 
 | 项目 | 说明 |
@@ -59,7 +59,7 @@
 因此本插件把链路拆成两段，各用各的扩展机制：
 
 - **确定性一段**（`before-context` 钩子）：判定「@ 了机器人本人」+「去掉 @提及 后
-  第一个词是触发词（默认 `yuyuko`／`wws`）」，命中即**必然**认领 —— 不经过模型，模型忽略不掉。
+  第一个词是 `yuyuko`」，命中即**必然**认领 —— 不经过模型，模型忽略不掉。
 - **LLM 一段**（`wows-query` 工具）：工具是模型唯一能主动发起查询的入口；
   数据到手后由模型决定怎么接话。
 
@@ -77,7 +77,7 @@ QQ Agent（OneBot）解析消息，文本形如 "@机器人(QQ:1) yuyuko ship �
         │
         ▼
 before-context 钩子（确定性，微秒级，默认不发网络请求）
-  ① 判定「@ 的是不是机器人本人」+「第一个词是不是触发词（yuyuko/wws）」
+  ① 判定「@ 的是不是机器人本人」+「第一个词是不是 yuyuko」
   ② 记下发起人 QQ（工具执行时的 ctx 里没有这个信息）
   ③ 把「【wws 指令已认领】发起人 + 指令 + 该调哪个工具」追加到该条消息
         │
@@ -325,7 +325,7 @@ curl http://127.0.0.1:8788/health
 ### 6.1 触发条件（两个条件缺一不可）
 
 ```
-消息 @ 了机器人本人  ✓    且    去掉 @提及 后第一个词是触发词（yuyuko/wws）  ✓
+消息 @ 了机器人本人  ✓    且    去掉 @提及 后第一个词是 yuyuko  ✓
                       →  认领，交给 wows-query 工具
 ```
 
@@ -333,7 +333,7 @@ curl http://127.0.0.1:8788/health
 |---|---|
 | `@机器人 yuyuko ship 大和` | ✅ 认领，指令 = `ship 大和`（**触发词后面的内容原样转发给 Hikari-core-v2**） |
 | `@机器人 yuyuko ship 大和 recent 30` | ✅ 认领，指令 = `ship 大和 recent 30` |
-| `@机器人 wws 大和` | ✅ 认领（`wws` 与 `yuyuko` 等价，保留以兼容上游帮助页与老文案） |
+| `@机器人 wws 大和` | ❌ **不认领**（只认 yuyuko；上游帮助页里的 wws 写法要换成 yuyuko） |
 | `@机器人 yuyuko` | ✅ 认领，等同于空指令 → 上游回帮助图 |
 | `yuyuko ship 大和`（未 @） | ❌ 不认领 |
 | `@机器人 大和`（无触发词） | ❌ 不认领 |
@@ -341,7 +341,7 @@ curl http://127.0.0.1:8788/health
 | `@机器人 用 yuyuko 查一下`（触发词在句中） | ❌ 不认领 |
 | `我觉得 yuyuko 不错` | ❌ 不认领 |
 
-> 设计取向是**宁可不触发**：群里聊到 `wws` / `yuyuko` 是常态，抢话的代价高于漏答。
+> 设计取向是**宁可不触发**：群里聊到 `yuyuko` 是常态，抢话的代价高于漏答。
 > 判定失败时只在 `debug` 日志里留一条原因，不做任何猜测。
 > 触发词可换成任意词（改 `triggerKeywords`），但"必须 @ 机器人 + 触发词在最前"这两条不变。
 
@@ -398,7 +398,7 @@ curl http://127.0.0.1:8788/health
 | `includeDataInContext` | `true` | 不希望把数据文本注入提示词时关闭 |
 | `serveImage` | `true` | 端口冲突等情况下可关闭（自动退回 file/base64） |
 | `imageServerPort` | `32801` | 端口冲突时更换 |
-| `triggerKeywords` | `["yuyuko","@yuyuko","wws","@wws"]` | 换用其它触发词（需编辑 `data/config.json`） |
+| `triggerKeywords` | `["yuyuko"]` | 换用其它触发词（需编辑 `data/config.json`） |
 | `debug` | `false` | 排查问题：打印认领结果、耗时与图片大小 |
 
 其余设置项（平台标识、出图格式、缓存目录、代理、浏览器、`--ignore-list` 对应项等）
