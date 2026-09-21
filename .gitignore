@@ -48,3 +48,9 @@ yuyuko-token.txt
 hikari-token.txt
 secret*.txt
 bridge-token.txt
+
+# ── 只对某台机器有意义的部署辅助脚本 ─────────────────────────────────────────
+# push-to-github.ps1 里写死了本机的 git 全局 url.insteadOf 镜像、~/.ssh/config 的
+# 代理隧道（ssh 隧道主机:443 via 127.0.0.1:7890）、以及示例仓库名 —— 都是
+# 环境相关的私人信息，对别人的机器没有价值，也泄露本机网络配置。故不入库。
+push-to-github.ps1
