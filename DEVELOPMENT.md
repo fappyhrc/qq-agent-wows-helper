@@ -171,9 +171,13 @@ plugins/yuyuko-helper/
 
 > 一句话记法：**群友看得见的一律 `yuyuko`；工具短名与上游原文保留 `wows`/`wws`。**
 >
-> ⚠️ 本次把 `id` 从 `wows-helper` 改成了 `yuyuko-helper`，这属于**破坏性变更**：
-> 旧 id 下的设置不会自动跟过来。本机已顺带把 `data/config.json` 里的键手工迁移
-> （见 §4.5），别人的机器需要重填一次「yuyuko API 凭据」并重新开启插件。
+> ⚠️ 本次把 `id` 从 `wows-helper` 改成了 `yuyuko-helper`（目录同步改名），这属于
+> **破坏性变更**：旧 id 下的设置不会自动跟过来。本机已顺带把 `data/config.json`
+> 里的键手工迁移（见 §4.5），别人的机器需要重填一次「yuyuko API 凭据」并重新开启插件。
+>
+> ⚠️ **改目录名必须先完全退出 QQ Agent**。本机实测：应用开着时 `Rename-Item` 会以
+> `because it is in use` 失败 —— 热重载监视着 `plugins/`，且被监视目录若同时是某个
+> 进程的工作目录，Windows 一律拒绝重命名。另一个坑见 §10.3 最后一条。
 
 **运行时数据**（均在插件目录内，已被 `.gitignore` 排除，可整体删除后重新生成）：
 
@@ -662,6 +666,8 @@ node plugins/yuyuko-helper/bridge/verify_node.mjs 32941 "账号ID:Token" python
 | 用户回复了数字但没有续查 | 回复中未 @ 机器人 | 让其使用 `@机器人 2`；或关闭 `requireAt` |
 | 改名后插件显示"已启用"，但每次查询提示"还没有配置 yuyuko API 凭据" | 插件 `id` 从 `wows-helper` 改成了 `yuyuko-helper`，而 `data/config.json` 里仍是旧键，配置等于空的 | 把该键改名为 `yuyuko-helper`（整块值保留），或用设置页重填凭据；见 §3 命名对照 |
 | 提交时 `git diff` 里中文注释整个文件都变了 / 文件不再被识别为 UTF-8 | 用 `Add-Content` 以 ANSI 追加过内容（**本插件真的踩过**：`.gitignore` 末行注释被写成 GBK，整文件因此不是合法 UTF-8） | 用 UTF-8 重写该文件；追加文本请改用 `[System.IO.File]::AppendAllText($p,$s,[Text.Encoding]::UTF8)` 或 `Out-File -Encoding utf8` |
+| 想给插件目录改名，`Rename-Item` 报 `because it is in use` | 两个原因之一：QQ Agent 的热重载正监视 `plugins/`；或**某个 shell/进程的工作目录就在该目录里**（Windows 不允许重命名进程的 CWD）。逐项给子文件改名都能成功，就是典型症状 | 先退出 QQ Agent；再把执行重命名的 shell 的工作目录切到插件目录**之外**（例如 `plugins/` 或 `C:\`）再执行 |
+| 在别的目录执行 `node .precommit-scan.mjs`，输出"通过"但明显不对 | 该脚本曾用 `process.cwd()` 当扫描根，cwd 不对就会**静默扫错地方**（最危险的假阴性） | 已改为按脚本自身路径定位（`import.meta.url`）；旧版请勿再用 |
 
 排障时建议先开启插件的 `debug` 开关：日志会记录认领了哪条指令（含判定原因）、
 是否发起查询、耗时以及图片大小。

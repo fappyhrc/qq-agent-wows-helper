@@ -1,9 +1,12 @@
 // 提交前安全扫描：检查将要入库的文件里有没有真实凭据 / 体积异常。
-// 用法：node .precommit-scan.mjs
+// 用法：node .precommit-scan.mjs（在哪个目录执行都行）
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = process.cwd();
+// ⚠️ 用**脚本自身所在目录**，不要用 process.cwd()：从外层目录（例如 C:\QQ-Agent 0.4）
+//    执行时 cwd 并不是插件目录，会静默扫错地方并报"通过" —— 那是最危险的假阴性。
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 // 只扫这些"会进库"的路径（与 .gitignore 的排除项保持一致）
 const SKIP_DIRS = new Set(['.git', 'data', '.hikari-src', '.hikari-deps', '.probe', '.probe2', 'node_modules', '__pycache__']);
