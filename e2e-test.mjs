@@ -129,7 +129,7 @@ await plugin.hooks['before-context']({
   chatKey: 'group:12345', ...ctxFields, chatName: '测试群'
 });
 check(entry.text.startsWith(`@${BOT_NICK}(QQ:${BOT_QQ}) wws 大和`), '原话保留在最前（不是替换）');
-check(entry.text.includes('【wws 指令已认领】'), '注入了认领块');
+check(entry.text.includes('【yuyuko 指令已认领】'), '注入了认领块');
 check(entry.text.includes('wows-helper__wows-query'), '把工具名交给模型');
 check(entry.text.includes('command="大和"'), '把指令正文交给模型（不带 wws）');
 check(entry.text.includes('QQ:1000000001'), '把发起人写清楚（工具 ctx 里没有这个信息）');
@@ -147,7 +147,7 @@ for (const [name, text, shouldFire] of cases) {
   const e = { id: 90, senderId: '1000000001', senderName: '老八', text };
   const before = bridgeReqs.length;
   await plugin.hooks['before-context']({ triggerEntries: [e], chatKey: 'group:12345', ...ctxFields });
-  const fired = e.text.includes('【wws 指令已认领】');
+  const fired = e.text.includes('【yuyuko 指令已认领】');
   check(fired === shouldFire, `${name} → ${shouldFire ? '认领' : '不认领'}`, e.text.slice(0, 60));
   check(bridgeReqs.length === before, `${name} → 钩子没有发起网络请求`);
 }
@@ -171,7 +171,7 @@ const yCases = [
 for (const [text, shouldFire, wantCmd] of yCases) {
   const e = { id: 89, senderId: '1000000001', senderName: '老八', text };
   await plugin.hooks['before-context']({ triggerEntries: [e], chatKey: 'group:12345', ...ctxFields });
-  const fired = e.text.includes('【wws 指令已认领】');
+  const fired = e.text.includes('【yuyuko 指令已认领】');
   check(fired === shouldFire, `${text.slice(-24)} → ${shouldFire ? '认领' : '不认领'}`,
     e.text.slice(0, 80));
   if (shouldFire && wantCmd) {
@@ -188,7 +188,7 @@ plugin.internals.selfInfo.id = '';
 const blind = { id: 91, senderId: '1000000001', senderName: '老八', text: `@${BOT_NICK}(QQ:${BOT_QQ}) wws 大和` };
 await plugin.hooks['before-context']({ triggerEntries: [blind], chatKey: 'group:12345', kind: 'group', chatId: '12345' });
 check(plugin.internals.selfInfo.id === BOT_QQ, '从"触发词前的那个 @(QQ:n)"学到机器人 QQ', plugin.internals.selfInfo.id);
-check(blind.text.includes('【wws 指令已认领】'), '身份未知时仍能认领（同一批内完成学习）');
+check(blind.text.includes('【yuyuko 指令已认领】'), '身份未知时仍能认领（同一批内完成学习）');
 // 只有昵称、没有 QQ 后缀时不采信（避免把别人的昵称当成机器人名）
 plugin.internals.selfInfo.id = '';
 const nameOnly = { id: 92, senderId: '1000000001', senderName: '老八', text: '@某位路人 wws 大和' };
@@ -212,7 +212,7 @@ const preq = bridgeReqs.at(-1);
 check(preq.command === '大和', '预取传的指令去掉了 wws 前缀');
 check(preq.platform_id === '1000000001', '预取的 PlatformId = 触发者 QQ（不是群号）');
 check(preq.group_id === '12345', '预取带上群号');
-check(prefetchEntry.text.includes('【wws 自动查询结果】'), '预取结果注入上下文');
+check(prefetchEntry.text.includes('【yuyuko 自动查询结果】'), '预取结果注入上下文');
 check(prefetchEntry.text.includes('胜率 54.3%'), '预取数据进入上下文');
 check(prefetchEntry.text.includes('渲染图已由插件自动发出'), '预取路径说明图片状态');
 settings.hookPrefetch = false;
@@ -226,7 +226,7 @@ settings.hookPrefetch = false;
 check(waitEntry.text.includes('1. 大和'), '多选待选项进入上下文');
 const bareSel = { id: 40, senderId: '1000000001', senderName: '老八', text: '2' };
 await plugin.hooks['before-context']({ triggerEntries: [bareSel], chatKey: 'group:12345', ...ctxFields });
-check(!bareSel.text.includes('【wws 自动查询结果】'), '没 @ 的裸序号 → 不续查（避免群里"2"被误认）');
+check(!bareSel.text.includes('【yuyuko 自动查询结果】'), '没 @ 的裸序号 → 不续查（避免群里"2"被误认）');
 
 // ⚠️ 续查**不能**在钩子里查：钩子硬超时 5 秒，而一次渲染实测 5.5~10 秒。
 //    早期版本在这里直接预取，结果续查永远只剩一条"续查失败"，数据和图全丢。
@@ -236,7 +236,7 @@ const selEntry = { id: 4, senderId: '1000000001', senderName: '老八', text: `@
 await plugin.hooks['before-context']({ triggerEntries: [selEntry], chatKey: 'group:12345', ...ctxFields });
 check(bridgeReqs.length === reqsBeforeSel, '钩子没有对桥接发任何查询请求（不再预取续查）',
   `新增 ${bridgeReqs.length - reqsBeforeSel} 条`);
-check(selEntry.text.includes('【wws 多选续查】'), '钩子注入了续查认领提示', selEntry.text);
+check(selEntry.text.includes('【yuyuko 多选续查】'), '钩子注入了续查认领提示', selEntry.text);
 check(selEntry.text.includes('selectIndex=2'), '提示里写明 selectIndex=2', selEntry.text);
 check(selEntry.text.includes('wows-helper__wows-query'), '提示里指明该调哪个工具', selEntry.text);
 check(selEntry.text.includes('大和改'), '提示里带上该序号对应的选项名', selEntry.text);

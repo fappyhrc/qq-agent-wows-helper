@@ -15,7 +15,7 @@ Hikari-core-v2 是 Python SDK，且**渲染链路完全在浏览器里**：
 
 Node 侧既无法运行该 SDK，也没有等价的渲染能力，因此采用
 「Node 薄客户端 + 本地常驻 Python 桥接」：Node 只负责 QQ 收发与确定性触发，
-Python 只负责 wws 的解析与出图，两侧通过本模块的 JSON 接口通信。
+Python 只负责指令的解析与出图，两侧通过本模块的 JSON 接口通信。
 
 对外接口
 --------
@@ -43,9 +43,9 @@ Python 只负责 wws 的解析与出图，两侧通过本模块的 JSON 接口�
     .. code-block:: json
 
         {
-          "command": "ship 大和 recent 30",  // wws 指令正文，**不含 wws 前缀**；续查时可为空
+          "command": "ship 大和 recent 30",  // 指令正文，**不含触发词前缀**；续查时可为空
           "platform": "QQ",                  // QQ / QQ_CHANNEL / QQ_OFFICIAL
-          "platform_id": "1000000001",       // 触发者 ID；wws 的账号绑定按此查询
+          "platform_id": "1000000001",       // 触发者 ID；账号绑定按此查询
           "bot_id": "0",
           "group_id": null,                  // 群聊传群号，私聊传 null
           "select_index": null,              // 续查：用户回复的序号（1 起）
@@ -1396,9 +1396,9 @@ async def call_hikari(*, command: str, platform: str, platform_id: str, bot_id: 
       （把序号写回挂起的 ``Hikari_Model``，再走 ``callback_hikari``）；
     * 否则 → 新查询（``init_hikari``）。
 
-    :param command: 指令正文（不含 ``wws`` 前缀）。续查时可为空。
+    :param command: 指令正文（不含触发词前缀）。续查时可为空。
     :param platform: ``QQ`` / ``QQ_CHANNEL`` / ``QQ_OFFICIAL`` 等平台标识。
-    :param platform_id: 触发者 ID。wws 的账号绑定按此查询，传错人会查到别人的水表。
+    :param platform_id: 触发者 ID。账号绑定按此查询，传错人会查到别人的水表。
     :param bot_id: 机器人自身标识（``init_hikari`` 的必填参数之一）。
     :param group_id: 群号；``None``/``""`` 表示私聊。
     :param select_index: 用户回复的序号（1 起）；``None`` 表示新查询。
@@ -1585,7 +1585,7 @@ class Handler:
         if not platform_id:
             await self.respond(writer, HTTPStatus.BAD_REQUEST,
                                {"ok": False, "error": "missing-platform-id",
-                                "hint": "缺少 platform_id（触发者 ID）：wws 的账号绑定按它查询，不能为空"})
+                                "hint": "缺少 platform_id（触发者 ID）：账号绑定按它查询，不能为空"})
             return
         if select_index is None and not command:
             await self.respond(writer, HTTPStatus.BAD_REQUEST,

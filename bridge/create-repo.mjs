@@ -2,8 +2,8 @@
 //
 // 用途：首次发布本插件时建一个私有仓库。之后不需要再用。
 //   set GH_API_TOKEN=<你的 token>
-//   node bridge/create-repo.mjs fappyhrc/qq-agent-wows-helper            # 私有（默认）
-//   node bridge/create-repo.mjs fappyhrc/qq-agent-wows-helper --public   # 公开
+//   node bridge/create-repo.mjs fappyhrc/qq-agent-yuyuko-helper          # 私有（默认）
+//   node bridge/create-repo.mjs fappyhrc/qq-agent-yuyuko-helper --public # 公开
 //
 // token 只从环境变量读取：不落盘、不打印、不进日志。
 // token 至少需要 repo 权限（细粒度 token 请勾 "Administration: Read and write"）。
@@ -18,7 +18,7 @@ const [owner, name] = full.split('/');
 
 const call = async (url, init = {}) => {
   const headers = {
-    'User-Agent': 'wows-helper-setup',
+    'User-Agent': 'yuyuko-helper-setup',
     Accept: 'application/vnd.github+json',
     // 认证头由下面拼装：值来自环境变量
     ...(init.headers || {})
@@ -65,7 +65,7 @@ const call = async (url, init = {}) => {
     body: JSON.stringify({
       name,
       private: !isPublic,
-      description: 'QQ Agent 插件：@机器人 wws <指令> → 经本地 Hikari-core-v2 桥接查询 yuyuko 平台并渲染出图',
+      description: 'QQ Agent 插件：@机器人 yuyuko <指令> → 经本地 Hikari-core-v2 桥接查询 yuyuko 数据源并渲染出图',
       has_issues: true,
       has_wiki: false,
       has_projects: false,

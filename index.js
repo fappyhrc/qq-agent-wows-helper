@@ -4,11 +4,11 @@
  *
  * 职责
  * ----
- * 让群里一句「@机器人 wws 大和」变成"查得到、画得出、发得出去"，并把链路拆成两段，
+ * 让群里一句「@机器人 yuyuko 大和」变成"查得到、画得出、发得出去"，并把链路拆成两段，
  * 各用各的扩展机制（对照 `doc/extend_development/plugin-development.md` §0/§2）：
  *
  * 1. **确定性一段** —— `before-context` 钩子负责**认领**。
- *    判定条件能写成 if（「@ 了机器人本人」+「去掉 @提及 后第一个词是 wws」），
+ *    判定条件能写成 if（「@ 了机器人本人」+「去掉 @提及 后第一个词是 yuyuko」），
  *    漏认领就没有下文，因此必须走钩子、不经模型。钩子同时把
  *    「谁在问、问的什么、该调哪个工具」写进本批上下文。
  * 2. **LLM 一段** —— 模型据此调用 `wows-query` 工具。
@@ -17,8 +17,8 @@
  * 为什么查询不放在钩子里
  * ----------------------
  * 钩子硬超时 5 秒（核心 `src/skills/manager.js` 的 `DEFAULT_HOOK_TIMEOUT_MS`），
- * 而实测一次 wws 查询需 5~13 秒（yuyuko API + 浏览器端模板渲染 + 截图）。
- * 预取必然超时，只会让每次 `@wws` 白等几秒再退回工具 —— 因此默认 `hookPrefetch=false`，
+ * 而实测一次 yuyuko 查询需 5~13 秒（yuyuko API + 浏览器端模板渲染 + 截图）。
+ * 预取必然超时，只会让每次 `@机器人 yuyuko …` 白等几秒再退回工具 —— 因此默认 `hookPrefetch=false`，
  * 查询交给没有时限的工具。实测数据与复核脚本见 DEVELOPMENT.md 与 `bridge/probe_hikari.py`。
  *
  * 为什么渲染图默认由插件直接发
@@ -62,16 +62,16 @@ const lastResult = new Map();
 
 /**
  * 本轮触发消息的 id：`chatKey → messageId`。
- * 唯一用途：`replyToTrigger` 打开时，自动发出的图能引用那句"wws xxx"。
+ * 唯一用途：`replyToTrigger` 打开时，自动发出的图能引用那句"yuyuko xxx"。
  * 钩子里拿得到（`triggerEntries[].id`），工具执行时该上下文已不存在，故在此过一手。
  */
 const triggerMsg = new Map();
 
 /**
- * 最近一次 wws 触发者：`chatKey → senderId`。
+ * 最近一次 yuyuko 触发者：`chatKey → senderId`。
  *
  * 必须记录的原因：工具执行时拿到的 `ctx` 里**没有触发者 QQ 号**
- * （只有 `chatKey` / `chatId` / `selfId`），而 wws 的账号绑定正是按 PlatformId 查询。
+ * （只有 `chatKey` / `chatId` / `selfId`），而 yuyuko 的账号绑定正是按 PlatformId 查询。
  * 用群号或机器人号去查必然查到别人（或查不到）。钩子认领时存下，工具路径再取回。
  */
 const triggerSender = new Map();
@@ -84,7 +84,7 @@ let probeFailedAt = 0;
 /**
  * 机器人自己的身份：用来判断"这条消息 @ 的是不是我"。
  *
- * 触发判定要求 **既 @ 了机器人、又有 wws**（与官方 wws 机器人一致）。
+ * 触发判定要求 **既 @ 了机器人、又有 yuyuko**（两个条件缺一不可）。
  * QQ Agent 的 OneBot 文本把 at 段还原成 `@昵称(QQ:机器人QQ)`，所以：
  *   · selfId（机器人 QQ）→ 精确命中，且能从这条消息里直接学到（见 learnSelfId）
  *   · 昵称               → `@昵称`（speaker-identity 插件关闭时的形态）
@@ -96,7 +96,7 @@ const selfInfo = { id: '', nickname: '', at: 0, triedAt: 0 };
  * 从一条消息里学习机器人自身身份（文本形如 `@昵称(QQ:机器人QQ)`）。
  *
  * 分两级：优先采信调用方传入的 `selfId`（即钩子上下文的 `ctx.selfId`）；
- * 没有时退化到"推断"—— 依据官方语义，`@机器人 wws <指令>` 中
+ * 没有时退化到"推断"—— `@机器人 yuyuko <指令>` 中
  * **紧邻触发词的最后一个 @提及**就是机器人本人。
  *
  * @param {string} text 消息原文。
@@ -104,8 +104,8 @@ const selfInfo = { id: '', nickname: '', at: 0, triedAt: 0 };
  * @returns {void} 结果写入模块级 `selfInfo`。
  *
  * @remarks
- * **只学 QQ 号，绝不学昵称。** `@机器人 wws 大和` 里"@ 后面那个名字"确实是机器人，
- * 但 `@群友 wws 大和`（查别人水表）中同一位置是**别人的名字**。一旦把它记成机器人昵称，
+ * **只学 QQ 号，绝不学昵称。** `@机器人 yuyuko 大和` 里"@ 后面那个名字"确实是机器人，
+ * 但 `@群友 yuyuko 大和`（查别人水表）中同一位置是**别人的名字**。一旦把它记成机器人昵称，
  * 之后所有 `@那个群友` 都会被误判为"@ 了我"。QQ 号无此问题：它是被 @ 者的真实身份。
  * 昵称只从可信来源取：钩子上下文的 `selfNickname`/`botName`，或 `get_login_info`。
  */
@@ -117,7 +117,7 @@ function learnSelfId(text, selfId) {
     selfInfo.at = Date.now();
     return;
   }
-  // 走推断分支：`@机器人 wws <指令>` 中紧邻触发词的那个 @ 即机器人
+  // 走推断分支：`@机器人 yuyuko <指令>` 中紧邻触发词的那个 @ 即机器人
   if (!text) return;
   const parsed = extractMentions(String(text).replace(/^[\s\u200b\u200e\u200f\ufeff]+/, ''));
   if (!parsed.mentions.length) return;
@@ -189,7 +189,7 @@ export function setup(api) {
   warn = (...a) => api.warn(...a);
   imageServer.setLog((m) => api.log(m));
   registerTools(api);
-  api.log('已加载：@wws 指令将交给 Hikari 桥接服务查询并渲染出图');
+  api.log('已加载：@机器人 yuyuko 指令将交给 Hikari 桥接服务查询并渲染出图');
   // 凭据未配置是首次部署最常见的拦路虎：在加载时就提示，比等群里报错早一步
   if (!cfg().yuyukoToken) {
     api.warn('还没填「yuyuko API 凭据」（账号ID:Token）——请到本插件设置里填写，'
@@ -291,7 +291,7 @@ async function probeBridge() {
     if (r.ok) {
       bridgeOk = true;
       log(r.ready ? '桥接服务连接正常' : '桥接服务已连接，但依赖还没就绪（hikari-core / playwright）');
-      // 凭据没配时提前说清楚 —— 否则用户第一次 @wws 只会看到"未授权"，很难定位
+      // 凭据没配时提前说清楚 —— 否则用户第一次 @机器人 yuyuko 只会看到"未授权"，很难定位
       if (r.detail?.token_configured === false && !c.yuyukoToken) {
         warn('还没配置 yuyuko API 凭据：请在插件设置里填「yuyuko API 凭据」（账号ID:Token），'
           + '或用 --token / 环境变量 HIKARI_TOKEN 启动桥接服务。');
@@ -328,7 +328,7 @@ function registerTools(api) {
     // description 是模型判断"要不要调用"的唯一依据，必须同时写清"做什么"与"何时用"
     description:
       '查询战舰世界（World of Warships）玩家/舰船/军团/排行榜数据，数据来自 Hikari-core-v2（yuyuko 平台），'
-      + '结果通常会被渲染成图片。参数 command 只填 wws 后面的部分，不要带 wws 前缀。'
+      + '结果通常会被渲染成图片。参数 command 只填 yuyuko 后面的部分，不要带 yuyuko 前缀。'
       + '例：command="大和"（某人总水表）、command="ship 大和"（单船水表）、command="recent 30"（近期 30 天）、'
       + 'command="ship.rank cn 大和"（单船排行榜）、command="cw.rank"（军团战排行）、command="帮助"。'
       + '什么时候用：群里有人问战舰世界战绩/水表/排名，或你判断需要这些数据来把话接下去。'
@@ -340,7 +340,7 @@ function registerTools(api) {
       properties: {
         command: {
           type: 'string',
-          description: 'wws 指令正文（不含 wws 前缀），如"大和"、"ship 大和 recent 30"、"cw.rank asia"、"帮助"'
+          description: 'yuyuko 指令正文（不含 yuyuko 前缀），如"大和"、"ship 大和 recent 30"、"cw.rank asia"、"帮助"'
         },
         platformId: {
           type: 'string',
@@ -361,7 +361,7 @@ function registerTools(api) {
     async execute(ctx, args) {
       try {
         const command = String(args?.command ?? '').trim();
-        if (!command) return { content: '缺少 command：请填 wws 后面的指令正文，例如 "大和" 或 "帮助"。', isError: true };
+        if (!command) return { content: '缺少 command：请填 yuyuko 后面的指令正文，例如 "大和" 或 "帮助"。', isError: true };
         // 序号口径必须与 lib/trigger.js 的 parseSelectIndex 一致（1~30）：
         // 模型可能给 0 / 负数 / 99，直接透传给桥接只会换回一句难懂的报错
         let selectIndex = null;
@@ -440,7 +440,7 @@ function registerTools(api) {
 /**
  * 解析 Hikari 需要的平台身份三元组。
  *
- * `PlatformId` 必须是**触发者本人**：wws 的账号绑定（bind）按 PlatformId 存储，
+ * `PlatformId` 必须是**触发者本人**：yuyuko 的账号绑定（bind）按 PlatformId 存储，
  * 传群号会把"我的水表"变成"群号的水表"；传机器人自己的号则会查到机器人账号。
  *
  * @param {{kind?: string, chatId?: string, selfId?: string, senderId?: string}} [ctxFields]
@@ -482,7 +482,7 @@ function sessionKeyOf({ chatKey = '', kind = 'group', chatId = '', senderId = ''
 }
 
 /**
- * 记录"最近一次 wws 是谁发起的"（`chatKey → senderId`），超出 50 条淘汰最旧。
+ * 记录"最近一次 yuyuko 是谁发起的"（`chatKey → senderId`），超出 50 条淘汰最旧。
  *
  * @param {string} chatKey 会话键。
  * @param {string} senderId 触发者 QQ 号。
@@ -507,7 +507,7 @@ function rememberSender(chatKey, senderId) {
  *
  * @param {object} params
  * @param {object} params.ctx 运行上下文；必须含 `sender`（用于发图）。
- * @param {string} params.command 指令正文（不含 `wws`）。
+ * @param {string} params.command 指令正文（不含 `yuyuko`）。
  * @param {string} [params.platformIdOverride] 本次强制指定的查询目标。
  * @param {number|null} [params.selectIndex] 续查序号（1~30）。
  * @param {string} [params.source] 调用来源，仅用于日志与措辞（`'tool'` / `'hook'`）。
@@ -553,7 +553,7 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
     bridgeOk = false;
     probeFailedAt = Date.now();
     if (c.debug) warn(`桥接调用失败（${source}，"${command}"）：${error?.message ?? error}`);
-    return { ok: false, text: `【wws 自动查询结果】\n查询失败：${friendlyBridgeError(error)}` };
+    return { ok: false, text: `【yuyuko 自动查询结果】\n查询失败：${friendlyBridgeError(error)}` };
   }
   const elapsed = Date.now() - t0;
 
@@ -564,7 +564,7 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
 
   // 凭据没配：把桥接的英文/技术化措辞换成"去哪填"的人话（这是最常见的首次使用故障）
   if (isTokenMissing(data)) {
-    return { ok: false, text: `【wws 自动查询结果】\n指令：wws ${command}\n${TOKEN_MISSING_TEXT}` };
+    return { ok: false, text: `【yuyuko 自动查询结果】\n指令：yuyuko ${command}\n${TOKEN_MISSING_TEXT}` };
   }
 
   // 出图：桥接把渲染结果以 base64 回传（浏览器端 Nunjucks 渲染只有 Python 侧能做）。
@@ -619,12 +619,12 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
     // ⚠️ 这张"选择列表图"必须**直接发出去**：用户要在图里看选项，再由模型 @ 他回序号。
     //    早期这里只把选项拼成文字交给模型，图被丢掉了 —— 群里既看不到选项图，
     //    模型也只是照着文字复述，用户完全不知道该怎么选。
-    const image = await attachImage(`wws ${command}（多选）`, platformId);
+    const image = await attachImage(`yuyuko ${command}（多选）`, platformId);
     const sentInfo = await autoSend(image);
     const label = selectIndex == null ? command : `${command}（续查 · 选择 ${selectIndex}）`;
     const out = [
-      '【wws 自动查询结果】',
-      `指令：wws ${label}`,
+      '【yuyuko 自动查询结果】',
+      `指令：yuyuko ${label}`,
       waitingHint(c.requireAt),                       // 与钩子路径共用一份文案
       image
         ? (sentInfo?.ok
@@ -648,7 +648,7 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
   if (status === 'failed' || status === 'error') {
     return {
       ok: false,
-      text: `【wws 自动查询结果】\n指令：wws ${command}\n结果：${clip(text || '服务端返回失败但没有说明', 500)}`
+      text: `【yuyuko 自动查询结果】\n指令：yuyuko ${command}\n结果：${clip(text || '服务端返回失败但没有说明', 500)}`
     };
   }
 
@@ -665,7 +665,7 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
   };
 
   // 默认直接发图：模型不会主动发它看不见的图，等它判断的结果通常是"群里什么都没有"。
-  result.image = await attachImage(`wws ${command}`, platformId);
+  result.image = await attachImage(`yuyuko ${command}`, platformId);
   result.sentInfo = await autoSend(result.image);
 
   lastResult.set(chatKey, { at: Date.now(), text: bodyText, dataType, command, image: result.image });
@@ -674,7 +674,7 @@ async function handleQuery({ ctx, command, platformIdOverride = '', selectIndex 
     if (oldest) lastResult.delete(oldest[0]);
   }
 
-  if (c.debug) log(`wws 查询完成（${source}）："${command}" ${status} ${elapsed}ms ${result.image ? `图 ${Math.round(result.image.bytes / 1024)}KB` : '无图'}`);
+  if (c.debug) log(`yuyuko 查询完成（${source}）："${command}" ${status} ${elapsed}ms ${result.image ? `图 ${Math.round(result.image.bytes / 1024)}KB` : '无图'}`);
 
   return { ok: true, text: formatResultText(result, c), result };
 }
@@ -717,7 +717,7 @@ async function sendImageNow(ctx, image, { note = null, replyToMessageId = null, 
       try {
         ctx.session?.sent?.push({
           type: 'image',
-          text: `[wws 渲染图${note ? `:${String(note).slice(0, 40)}` : ''}]`,
+          text: `[yuyuko 渲染图${note ? `:${String(note).slice(0, 40)}` : ''}]`,
           at: new Date().toLocaleTimeString('zh-CN', { hour12: false })
         });
         if (ctx.session?.id) ctx.emit?.('session-update', ctx.session.id);
@@ -769,8 +769,8 @@ export const hooks = {
    *
    * 两遍扫描，职责互不重叠：
    *
-   * 1. 第一遍 —— 认领 wws 指令。命中后记录触发者与消息 id；默认只注入一条
-   *    「【wws 指令已认领】」块，告诉模型调哪个工具、参数是什么。
+   * 1. 第一遍 —— 认领 yuyuko 指令。命中后记录触发者与消息 id；默认只注入一条
+   *    「【yuyuko 指令已认领】」块，告诉模型调哪个工具、参数是什么。
    *    若开启 `hookPrefetch`，则在此限时预取数据并直接注入结果。
    * 2. 第二遍 —— 认领序号回复。用户对上一轮的多选提示回数字时，代其续查并注入结果。
    *
@@ -787,7 +787,7 @@ export const hooks = {
    *
    * @remarks
    * **这是有意的"宁可不触发"设计**：触发词必须在最前、且必须 @ 到机器人本人。
-   * 群里聊到 wws 三个字母是常态，抢话比漏答更糟；判定失败时只在 `debug` 日志里
+   * 群里聊到 yuyuko 是常态，抢话比漏答更糟；判定失败时只在 `debug` 日志里
    * 留一行原因，绝不猜。
    *
    * 关于"钩子里做网络请求"：默认路径**不发任何请求**（纯文本判定，微秒级）。
@@ -831,7 +831,7 @@ export const hooks = {
       // 记下触发者：工具路径的 ctx 里没有 QQ 号，靠这里带过去
       rememberSender(key, entry?.senderId);
 
-      const label = `wws ${hit.command || '帮助'}`;
+      const label = `yuyuko ${hit.command || '帮助'}`;
       if (c.debug) log(`认领指令：${String(entry?.senderName ?? entry?.senderId ?? '?')} 「${label}」（${hit.reason}）`);
 
       // ① 预取：钩子内限时（真 abort），把结果写进上下文
@@ -877,11 +877,11 @@ export const hooks = {
           const timedOut = error?.kind === 'timeout' || /超时|abort/i.test(msg);
           if (isTokenMissing(msg)) {
             // 凭据没配是最常见的首次故障：这里直接把"去哪填"说清楚
-            note = `【wws 自动查询结果】\n指令：wws ${command}\n${TOKEN_MISSING_TEXT}`;
+            note = `【yuyuko 自动查询结果】\n指令：yuyuko ${command}\n${TOKEN_MISSING_TEXT}`;
           } else {
             note = timedOut
-              ? `【wws 自动查询结果】\n指令：wws ${command}\n本次预取超时（渲染较慢）。请立刻用 wows-query 工具重查一次（工具没有 5 秒限制），查到后再接话；不要凭印象说数据。`
-              : `【wws 自动查询结果】\n指令：wws ${command}\n查询失败：${friendlyBridgeError(error)}`;
+              ? `【yuyuko 自动查询结果】\n指令：yuyuko ${command}\n本次预取超时（渲染较慢）。请立刻用 wows-query 工具重查一次（工具没有 5 秒限制），查到后再接话；不要凭印象说数据。`
+              : `【yuyuko 自动查询结果】\n指令：yuyuko ${command}\n查询失败：${friendlyBridgeError(error)}`;
           }
           if (c.debug) warn(`预取失败：${label} —— ${msg}`);
         }
@@ -889,13 +889,13 @@ export const hooks = {
         // 默认路径：钩子只做"确定性认领"，真正的查询交给 wows-query 工具。
         // 为什么不在钩子里查：一次查询要经过 yuyuko API + 浏览器渲染 + 截图，
         // 实测热态 5~13 秒（首次还要下载 chromium 与船图缓存，约 150 秒），
-        // 而钩子硬超时只有 5 秒 —— 预取必然超时，只会让每次 @wws 白等几秒（见 DEVELOPMENT.md §8）。
+        // 而钩子硬超时只有 5 秒 —— 预取必然超时，只会让每次 @机器人 白等几秒（见 DEVELOPMENT.md §8）。
         // 这里必须把"谁在问、问的什么"写清楚 —— 工具执行时的 ctx 里没有触发者 QQ 号。
         const cmd = hit.command || '帮助';
-        note = '【wws 指令已认领】\n'
+        note = '【yuyuko 指令已认领】\n'
           + `发起人：${String(entry?.senderName ?? entry?.senderId ?? '群友')}（QQ:${entry?.senderId ?? '?'}）\n`
-          + `指令：wws ${cmd}\n`
-          + `请立刻调用 wows-helper__wows-query 工具执行它（command="${cmd}"，不要带 wws 前缀），`
+          + `指令：yuyuko ${cmd}\n`
+          + `请立刻调用 wows-helper__wows-query 工具执行它（command="${cmd}"，不要带 yuyuko 前缀），`
           + '查到数据/出图后再接话。这个工具会真实查询并自动把渲染图发到群里，通常几秒。\n'
           + '在工具返回之前，不要凭印象说任何战绩数字。';
       }
@@ -906,7 +906,7 @@ export const hooks = {
       }
     }
 
-    // ② 序号回复：不带 wws，但上一轮挂起了多选会话。
+    // ② 序号回复：不带触发词，但上一轮挂起了多选会话。
     // 同样要求 @ 了机器人（或 requireAt 关闭）—— 群里连着两句"2"太常见。
     //
     // ⚠️ 这里**只认领、不查询**，和 ① 的默认路径保持一致。
@@ -926,7 +926,7 @@ export const hooks = {
       if (!pend) continue;
       const pl = pend.options[idx - 1];
       if (!pl) {
-        entry.text = `${text}\n\n【wws 多选续查】群友回复了序号 ${idx}，但上一轮只有 ${pend.options.length} 个待选项，该序号不合法。请提醒对方重新选择。`;
+        entry.text = `${text}\n\n【yuyuko 多选续查】群友回复了序号 ${idx}，但上一轮只有 ${pend.options.length} 个待选项，该序号不合法。请提醒对方重新选择。`;
         continue;
       }
       if (entry?.id) triggerMsg.set(key, entry.id);
@@ -940,7 +940,7 @@ export const hooks = {
       // （真实的查询与挂起对象由工具带着 sessionKey 去桥接取，所以这里删掉不影响执行）
       pending.delete(sessionKey);
       // 上下文里带上待选项：序号不合法时模型要能把可选项原样报回去。
-      entry.text = `${text}\n\n【wws 多选续查】\n`
+      entry.text = `${text}\n\n【yuyuko 多选续查】\n`
         + `发起人：${String(entry?.senderName ?? senderId ?? '群友')}（QQ:${senderId}）\n`
         + `该群友回复的是序号 ${idx}，对应：${clip(String(label), 80)}\n`
         + `待选项：\n${formatOptions(pend.options)}\n`

@@ -1,4 +1,4 @@
-# wows-helper bridge launcher (Windows / PowerShell)
+# qq-agent-yuyuko-helper bridge launcher (Windows / PowerShell)
 #
 # ASCII-ONLY ON PURPOSE. Windows PowerShell 5.1 reads .ps1 files as ANSI unless the
 # file has a UTF-8 BOM, so any non-ASCII byte in here risks corrupting the parser

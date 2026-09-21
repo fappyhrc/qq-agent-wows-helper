@@ -1,4 +1,4 @@
-# wows-helper · 战舰世界助手（使用手册）
+# qq-agent-yuyuko-helper · 战舰世界助手（yuyuko）使用手册
 
 > 在群里发 `@机器人 yuyuko ship 大和`，机器人会把这个账号（或这条船）的战绩**渲染成图片发出来**，
 > 并顺口说一句人话。
@@ -65,7 +65,7 @@ yuyuko API credential (format: accountID:Token)
 ### 1.3 第二步：在 QQ Agent 里启用插件
 
 1. 打开 QQ Agent → **「插件」** 页
-2. 找到 **战舰世界助手** —— 本插件出于安全考虑**默认关闭**，需要手动开启
+2. 找到 **战舰世界助手（yuyuko）** —— 本插件出于安全考虑**默认关闭**，需要手动开启
 3. 点启用；再进它的「设置」，确认两项：
    - **Hikari 桥接服务地址** = `http://127.0.0.1:8788`（默认值，端口没改过就不用动）
    - **yuyuko API 凭据** = 你的 `账号ID:Token`（没在启动窗口里填的，**这里必须填**）
@@ -209,7 +209,7 @@ yuyuko API credential (format: accountID:Token)
 
 ## 4. 设置项说明
 
-位置：QQ Agent →「插件」→ 战舰世界助手 →「设置」。
+位置：QQ Agent →「插件」→ 战舰世界助手（yuyuko）→「设置」。
 
 ### 4.1 最常用的几项
 

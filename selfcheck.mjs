@@ -127,7 +127,7 @@ const note = buildContextNote({
   autoSendImage: true,
   maxChars: 100
 });
-eq(note.includes('【wws 自动查询结果】'), true, '带结果抬头');
+eq(note.includes('【yuyuko 自动查询结果】'), true, '带结果抬头');
 eq(note.includes('胜率 54.3%'), true, '原样带数据');
 eq(note.includes('数字照抄'), true, '强调照抄数字');
 eq(note.includes('渲染图已由插件自动发出'), true, '说明图已发');

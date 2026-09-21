@@ -1,16 +1,16 @@
-# wows-helper 开发文档 · 战舰世界助手
+# qq-agent-yuyuko-helper 开发文档 · 战舰世界助手（yuyuko）
 
 > **这是开发文档**（架构、设计取舍、自检脚本、排障细节）。只是想把插件用起来的话，
 > 请看面向使用者的 [`README.md`](README.md)。
 >
-> **QQ Agent 插件** · 仓库 <https://github.com/fappyhrc/qq-agent-wows-helper>（私有）
+> **QQ Agent 插件** · 仓库 <https://github.com/fappyhrc/qq-agent-yuyuko-helper>（公开）
 > 群里发 `@机器人 yuyuko ship 大和`，机器人把 Hikari-core-v2 查到的战绩
 > **渲染成图片发出来**，并把真实数据交给 AI，由 AI 用群里的语气接一句人话。
 
 | 项目 | 说明 |
 |---|---|
 | 类型 | 确定性型插件（`before-context` 钩子）+ 2 个 LLM 工具 |
-| 放置位置 | `plugins/wows-helper/` |
+| 放置位置 | `plugins/yuyuko-helper/` |
 | 数据源 | [wows-yuyuko/Hikari-core-v2](https://github.com/wows-yuyuko/Hikari-core-v2)（Python SDK，GPL） |
 | 运行前提 | Python 3.11~3.14（实测 3.14.7 可用）+ 本地常驻桥接服务 |
 | 默认状态 | **关闭**（`enabledByDefault: false`，需在「插件」页手动开启） |
@@ -79,10 +79,10 @@ QQ Agent（OneBot）解析消息，文本形如 "@机器人(QQ:1) yuyuko ship �
 before-context 钩子（确定性，微秒级，默认不发网络请求）
   ① 判定「@ 的是不是机器人本人」+「第一个词是不是 yuyuko」
   ② 记下发起人 QQ（工具执行时的 ctx 里没有这个信息）
-  ③ 把「【wws 指令已认领】发起人 + 指令 + 该调哪个工具」追加到该条消息
+  ③ 把「【yuyuko 指令已认领】发起人 + 指令 + 该调哪个工具」追加到该条消息
         │
         ▼
-模型读到认领块 → 调用 wows-helper__wows-query 工具
+模型读到认领块 → 调用 wows-helper__wows-query 工具（工具名里的 `wows-helper` 是插件 id 前缀，见 §3）
         │
         ▼
 bridge/hikari_bridge.py（本地常驻，独立进程）
@@ -108,7 +108,7 @@ Python 负责 wws 的解析与出图，两侧通过一个 JSON 接口（`/health
 ### 2.3 为什么查询放在工具里，而不是钩子里
 
 钩子的硬超时是 **5 秒**，而一次真实查询需要 **5~13 秒**（见 [§8 实测性能](#8-实测性能)）。
-把查询放进钩子必然超时，结果是"每次 `@wws` 白等几秒，再退回工具重查一遍"，
+把查询放进钩子必然超时，结果是"每次 `@机器人 yuyuko …` 白等几秒，再退回工具重查一遍"，
 净亏一倍时间。因此 `hookPrefetch` 默认关闭，钩子只做零网络的文本判定，
 查询交给没有时限的工具。
 
@@ -124,7 +124,7 @@ Python 负责 wws 的解析与出图，两侧通过一个 JSON 接口（`/health
 ## 3. 文件结构
 
 ```
-plugins/wows-helper/
+plugins/yuyuko-helper/
 ├── plugin.json                 清单：31 项设置 + configSchema + 权限 + 提示词片段
 ├── index.js                    入口：钩子（确定性认领）+ 2 个工具
 ├── lib/
@@ -179,7 +179,7 @@ plugins/wows-helper/
 **方式 A：双击运行（最省事）**
 
 ```
-双击 plugins\wows-helper\启动桥接服务.bat
+双击 plugins\yuyuko-helper\启动桥接服务.bat
 ```
 
 首次会自动安装依赖（数分钟），并询问一次凭据 —— 不想现在填可直接回车，
@@ -188,7 +188,7 @@ plugins/wows-helper/
 **方式 B：PowerShell**
 
 ```powershell
-cd "C:\QQ-Agent 0.4\plugins\wows-helper"
+cd "C:\QQ-Agent 0.4\plugins\yuyuko-helper"
 powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1          # 会提示输入凭据
 # 或
 $env:HIKARI_TOKEN = "你的账号ID:你的Token"
@@ -214,7 +214,7 @@ git clone https://github.com/wows-yuyuko/Hikari-core-v2
 pip install --target .hikari-deps ./Hikari-core-v2
 set PYTHONPATH=%CD%\.hikari-deps
 python -m playwright install chromium
-python plugins/wows-helper/bridge/hikari_bridge.py
+python plugins/yuyuko-helper/bridge/hikari_bridge.py
 ```
 
 > ⚠️ **不要直接 `pip install hikari-core`**：PyPI 上那个包是**旧项目**
@@ -265,7 +265,7 @@ powershell -ExecutionPolicy Bypass -File bridge\start-bridge.ps1 `
 
 ### 4.4 在 QQ Agent 中启用并配置
 
-控制台顶部 → **「插件」页签** → 找到「战舰世界助手」→ 打开开关 → 打开其设置：
+控制台顶部 → **「插件」页签** → 找到「战舰世界助手（yuyuko）」→ 打开开关 → 打开其设置：
 
 | 设置项 | 填写内容 |
 |---|---|
@@ -295,18 +295,22 @@ curl http://127.0.0.1:8788/health
 
 | 群里发送 | 作用 |
 |---|---|
-| `yuyuko me` / `wws me` | 查询自己的水表（`yuyuko <服务器> <昵称>` 可查他人） |
-| `wws ship 大和` / `wws 单船 大和` | 单船水表（支持多词英文船名，如 `Jean Bart`） |
-| `wws recent 30` / `wws 近期` | 近期战绩 |
-| `wws ship 大和 recent 30` | 单船近期战绩 |
-| `wws recents` | 单场近期战绩 |
-| `wws ship.rank cn 大和` | 单船排行榜 |
-| `wws cw.rank [赛季]` | 军团战排行榜 |
-| `wws clan <服务器> <公会TAG>` | 公会信息 |
-| `wws bind <服务器> <昵称>` | 绑定游戏账号（绑定按 QQ 号存储） |
-| `wws roll 日本 战列舰 10` | 随机抽船 |
-| `wws sx` / `wws ban` / `wws box` | 扫雪收益 / 封禁记录 / 圣诞船池 |
-| `wws help` / `wws 帮助` | H5 帮助页 |
+| `yuyuko me` | 查询自己的水表（`yuyuko <服务器> <昵称>` 可查他人） |
+| `yuyuko ship 大和` / `yuyuko 单船 大和` | 单船水表（支持多词英文船名，如 `Jean Bart`） |
+| `yuyuko recent 30` / `yuyuko 近期` | 近期战绩 |
+| `yuyuko ship 大和 recent 30` | 单船近期战绩 |
+| `yuyuko recents` | 单场近期战绩 |
+| `yuyuko ship.rank cn 大和` | 单船排行榜 |
+| `yuyuko cw.rank [赛季]` | 军团战排行榜 |
+| `yuyuko clan <服务器> <公会TAG>` | 公会信息 |
+| `yuyuko bind <服务器> <昵称>` | 绑定游戏账号（绑定按 QQ 号存储） |
+| `yuyuko roll 日本 战列舰 10` | 随机抽船 |
+| `yuyuko sx` / `yuyuko ban` / `yuyuko box` | 扫雪收益 / 封禁记录 / 圣诞船池 |
+| `yuyuko help` / `yuyuko 帮助` | H5 帮助页 |
+
+> ⚠️ **表里原来的写法是 `wws`**：上游自身的帮助页与文档至今仍用 `wws` 作示例，
+> 那不是本插件的触发词。把上表的 `yuyuko` 换成 `wws` 后直接发给机器人**不会被认领**；
+> 同理，上游帮助图里印的 `wws xxx` 示例，在本插件里一律要换成 `yuyuko xxx`。
 
 **多选续查**：当上游返回 `wait`（如舰船重名），插件会把待选项发进群；
 用户在下一句 **@机器人 后回复数字**（`2`、`选 2`、`第2个` 均识别）即自动带上下文续查，
@@ -368,12 +372,12 @@ curl http://127.0.0.1:8788/health
 | 顺序 | 来源 | 说明 |
 |---|---|---|
 | 1 | 钩子上下文的 `selfId` | 最直接，但并非所有版本都会传入 |
-| 2 | 消息文本推断 | `@机器人 yuyuko` 中紧邻触发词的提及即机器人。**只学 QQ 号、绝不学昵称** —— 否则 `@群友 wws 大和` 会把群友名字记成机器人昵称 |
+| 2 | 消息文本推断 | `@机器人 yuyuko` 中紧邻触发词的提及即机器人。**只学 QQ 号、绝不学昵称** —— 否则 `@群友 yuyuko 大和` 会把群友名字记成机器人昵称 |
 | 3 | `get_login_info`（只读接口） | 后台异步补问，失败后每 60 秒可重试一次 |
 
 ### 6.3 发起人 QQ 号的来源
 
-`wws` 的账号绑定按 `PlatformId`（触发者 QQ）存储，因此"谁在问"必须准确。
+`yuyuko` 的账号绑定按 `PlatformId`（触发者 QQ）存储，因此"谁在问"必须准确。
 工具执行时的 `ctx` 中**没有**发送者 QQ，故由钩子在认领时记录：
 
 | 优先级 | 来源 |
@@ -389,7 +393,7 @@ curl http://127.0.0.1:8788/health
 
 ## 7. 配置项
 
-在「插件 → 战舰世界助手」设置页修改，**改完无需重启**（配置每次执行时现读）。
+在「插件 → 战舰世界助手（yuyuko）」设置页修改，**改完无需重启**（配置每次执行时现读）。
 
 | 设置项 | 默认 | 何时需要修改 |
 |---|---|---|
@@ -517,35 +521,48 @@ yuyuko 凭据的**主通路是插件设置页**：它让不敲命令行、不配
 ### 10.1 自检脚本
 
 ```bash
-# 本地逻辑自检（68 项：@提及解析 / 触发判定 / 边界用例 / 文本组装 / 图片服务）
+# 本地逻辑自检（87 项：@提及解析 / 触发判定 / 边界用例 / 文本组装 / 图片服务）
 # 不需要网络，也不需要 Python
-node plugins/wows-helper/selfcheck.mjs
+node plugins/yuyuko-helper/selfcheck.mjs
 
-# 端到端自检（64 项：起本地假桥接，跑通"钩子认领""工具查询+自动发图""多选序号续查"三条链路）
-node plugins/wows-helper/e2e-test.mjs
+# 端到端自检（80 项：起本地假桥接，跑通"钩子认领""工具查询+自动发图""多选序号续查"三条链路）
+node plugins/yuyuko-helper/e2e-test.mjs
 
-# 桥接客户端契约自检（28 项：success/wait/failed/error/超时/口令/会话键）
-node plugins/wows-helper/bridge/client-test.mjs
+# 桥接客户端契约自检（29 项：success/wait/failed/error/超时/口令/会话键）
+node plugins/yuyuko-helper/bridge/client-test.mjs
 
 # 桥接侧配置映射与凭据来源自检（含上游 use_broswer 笔误的兼容）
-python plugins/wows-helper/bridge/test_config_mapping.py
+python plugins/yuyuko-helper/bridge/test_config_mapping.py
 
 # 模板清单同步自保层自检（46 项：重试判定 / 日志降级 / 确定性故障不吞 / 幂等）
 # loguru 只装在 .hikari-deps，脚本会自动带上正确的 PYTHONPATH 重跑自己
-python plugins/wows-helper/bridge/test_template_sync.py
+python plugins/yuyuko-helper/bridge/test_template_sync.py
 
 # 渲染等待兜底自检（23 项：networkidle 超时放过 / 背景图跟踪 / DOM 空仍失败 / 防叠加）
-python plugins/wows-helper/bridge/test_render_guard.py
+python plugins/yuyuko-helper/bridge/test_render_guard.py
 
 # 上游超时堆栈降噪自检（9 项：抖动成功后不打堆栈 / 真失败必补打 / 无关 ERROR 不拦）
-python plugins/wows-helper/bridge/test_upstream_noise.py
+python plugins/yuyuko-helper/bridge/test_upstream_noise.py
 
-# yuyuko 短超时补时自检（6 项：只补 cache/check 那一个接口 / 绝不降低已有超时 / 域名判据）
-python plugins/wows-helper/bridge/test_yuyuko_timeout.py
+# yuyuko 短超时补时自检（10 项：只补 cache/check 那一个接口 / 绝不降低已有超时 / 域名判据）
+python plugins/yuyuko-helper/bridge/test_yuyuko_timeout.py
 
 # 提交前扫描：检查是否误纳入凭据或异常大文件
-node plugins/wows-helper/.precommit-scan.mjs
+node plugins/yuyuko-helper/.precommit-scan.mjs
 ```
+
+> **在受限沙箱里跑 Python 用例**：`test_render_guard.py` / `test_template_sync.py` /
+> `test_upstream_noise.py` / `test_yuyuko_timeout.py` 开头会用 `os.execve` **重启自己**并注入
+> `PYTHONPATH`（依赖只装在 `.hikari-deps`）。若运行环境禁止替换进程镜像（如文件沙箱），
+> 这一步会直接崩在 `0xC0000005`（**不是用例失败**）。绕过方式是自己先把依赖注入好，
+> 让脚本判断"依赖已可见"而跳过自我重启：
+>
+> ```bash
+> # PowerShell（先设两个环境变量，再跑）
+> $env:PYTHONPATH = "$PWD\.hikari-deps"
+> $env:WOWS_TEST_BOOTSTRAPPED = '1'
+> python bridge/test_render_guard.py
+> ```
 
 ### 10.2 真实环境核验
 
@@ -555,13 +572,13 @@ curl http://127.0.0.1:8788/health
 
 # 在你自己机器上测量真实查询耗时
 set PYTHONPATH=%CD%\.hikari-deps
-python plugins/wows-helper/bridge/probe_hikari.py "账号ID:Token"
+python plugins/yuyuko-helper/bridge/probe_hikari.py "账号ID:Token"
 
 # 核对 init_hikari 入参、以及 Ignore_List 是否真的生效
-python plugins/wows-helper/bridge/verify_params.py "账号ID:Token"
+python plugins/yuyuko-helper/bridge/verify_params.py "账号ID:Token"
 
 # 真实通路端到端：起真桥接 → Node fetch 查询 → 核验凭据下发与禁用清单
-node plugins/wows-helper/bridge/verify_node.mjs 32941 "账号ID:Token" python
+node plugins/yuyuko-helper/bridge/verify_node.mjs 32941 "账号ID:Token" python
 ```
 
 最近一次真实通路核验结果：
