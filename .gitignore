@@ -15,10 +15,6 @@ data/
 .hikari-src.tar.gz
 # 上游在当前工作目录留下的一次性目录（见 DEVELOPMENT.md §11），别入库
 .codex/
-# 调研用的上游源码克隆（Kokomi_Backend / Kokomi_Bot / 第三方文档），只读参考
-.kokomi-src/
-.kokomi-bot-src/
-.kokomi-doc-src/
 
 # ── 本地临时与日志 ───────────────────────────────────────────────────────────
 *.log
