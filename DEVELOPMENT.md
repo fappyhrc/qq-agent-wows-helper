@@ -157,17 +157,38 @@ plugins/yuyuko-helper/
 └── DEVELOPMENT.md              本文件（开发文档：架构 / 取舍 / 自检 / 排障）
 ```
 
-**命名对照**（四方习惯不同，最容易搞混，先看这张表）：
+**命名对照**（五方习惯不同，最容易搞混，先看这张表）：
 
 | 场合 | 用的名字 | 说明 |
 |---|---|---|
 | 仓库名 | `qq-agent-yuyuko-helper` | GitHub 仓库（旧名 `qq-agent-wows-helper`，GitHub 侧自动重定向） |
-| 部署目录 | `plugins/yuyuko-helper/` | 与仓库名对齐 |
-| 插件清单 `id` | `yuyuko-helper` | 设置页配置、`data/config.json` 的键、禁用清单都按它索引 |
+| 代码目录 | `plugins/yuyuko-helper/` | 放在 `plugins/` 是因为它是**确定性型**（`before-context` 钩子 + 工具），不是纯 LLM 技能 |
+| 插件清单 `id` | `yuyuko-helper` | 工具名前缀、配置键、禁用清单都按它索引；平台要求 id 与目录名一致 |
+| **配置落点** | **`data/config.json` 的 `skills.yuyuko-helper`** | ⚠️ 见下方说明：**平台把所有插件与技能的配置统一放在 `skills` 键下**，顶层没有 `plugins` 段。放错地方就会被判定为"未配置" |
 | 工具名前缀 | `yuyuko-helper__wows-query`、`yuyuko-helper__wows-send-image` | 前缀由插件 `id` 拼出（核心逻辑见 `src/plugin-loader.js`）；**短名保留 `wows-`**：工具语义确实是"查 World of Warships" |
 | 提示词片段 id | `yuyuko-helper-rules` | 同上，随 `id` 走 |
 | 触发词 | `yuyuko` | 只有它；`wws` 不是触发词 |
 | 上游（Hikari-core-v2） | `wws` | 上游自身的帮助页与文档仍这么写，照它把 `wws` 换成 `yuyuko` |
+
+> **为什么目录叫 `plugins/`，配置却在 `skills` 下？**（这里最容易误解，写清楚免得后人改错）
+>
+> 平台的 **Skill 是统称**：`plugins/` 与 `skills/` 只决定"代码放哪、由什么触发"
+> （确定性钩子 vs LLM 工具），但**两者的配置与开关都被收拢在 `config.skills[id]` 一处**。
+> 源码依据：
+>
+> - `src/skills/config.js` ——「Skill 的启用状态**只**存在 `config.skills[id].enabled` 一处；
+>   模块不允许再维护 `config.xxx.enabled` 之类的影子开关」
+> - `src/skills/manager.js` ——「唯一开关来源：启用状态只读 `config.skills[id].enabled`」
+> - `src/skills/routes.js` —— 删除插件时清理的正是 `config.skills.<id>`
+> - `src/config.js` 的 `migrateLegacySkills()` —— 专门把旧字段（`api.thinking` 等）
+>   **迁移进** `config.skills`，且注释点名了"迁进没人读的命名空间"这个历史事故
+>
+> 实测佐证：`plugins/` 下 14 个插件里凡在 `config.json` 有键的，**全部**落在 `skills.*`
+> （`account-pool`、`member-aliases`、`owner-identity`、`sleep-mode`、`speech-to-text`、
+> `thinking-adapters`、`reply-safety`、`yuyuko-helper`），顶层不存在 `plugins` 段。
+>
+> 结论：改 `id` / 目录名时，`config.skills.<id>` 这个键**必须跟着改**，否则平台找不到
+> 配置 → 表现为"插件显示已开启、但凭据为空"。
 
 > 一句话记法：**群友看得见的一律 `yuyuko`；工具短名与上游原文保留 `wows`/`wws`。**
 >
@@ -326,6 +347,10 @@ node -e "const fs=require('fs');const f=process.argv[1];const j=JSON.parse(fs.re
 ```
 
 迁移后 `data/config.json` 里不应再有 `wows-helper` 这个键。
+
+> 为什么是 `skills` 而不是 `plugins`？因为平台用 **Skill 统称**插件与技能，配置统一
+> 收在 `config.skills[id]`；顶层没有 `plugins` 段，写成 `plugins` 会导致"看着像配了、
+> 实际按新架构判定仍是未配置"。源码依据与实测佐证见 §3 的说明块。
 
 ### 4.6 部署自查
 

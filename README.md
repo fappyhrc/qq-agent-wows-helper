@@ -348,7 +348,11 @@ yuyuko API credential (format: accountID:Token)
 - **上游**：[wows-yuyuko/Hikari-core-v2](https://github.com/wows-yuyuko/Hikari-core-v2)
   （Python SDK，GPL）负责取数、套模板、渲染成图。**本插件不含任何战绩数据**。
 - **本插件**：在 QQ Agent 里"确定性地认领指令 → 调上游 → 把图发出去 → 把数据交给模型接话"。
-- **凭据**：由你在设置页或启动参数提供，只保存在本机。
+  代码在 `plugins/yuyuko-helper/`，因此在「插件」页里管理。
+- **凭据**：由你在设置页或启动参数提供，只保存在本机 `data/config.json`。
+  注意该文件里本插件的配置挂在 **`skills.yuyuko-helper`** 下，不是 `plugins` ——
+  这是 QQ Agent 的设计（它用 Skill 统称插件与技能，配置统一放一处），
+  不是装错了位置；手工编辑时别改到这个键以外的地方。
 
 ---
 
